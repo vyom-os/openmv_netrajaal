@@ -119,7 +119,7 @@ NET_PATH_EXPIRY_MS = 1800000 # 1800 second, 30 minutes
 TRANSMODE_LOCK_TIMEOUT = 600 # TODO PRODUCTION
 TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
 CHUNK_BURST_SIZE = 20
-CHUNK_BURST_RX_SLEEP = 0.2
+CHUNK_BURST_RX_SLEEP = 0.1
 # Config test for SF7
 LORA_FREQ = 868.0
 LORA_BW = 125             # 125kHz provides better sensitivity than wider bandwidths
@@ -1976,7 +1976,7 @@ async def person_detection_loop():
                             logger.debug("[WARNING] : GPS module is not initialized, skipping GPS location")
                     except Exception as e: # Not falat error
                         logger.warning(f"[PIR] Failed to get GPS location: {e}")
-                    
+
                     try:
                         logger.info(f"[PIR] GPS Data LAT={lat}, LON={lon}")
                         imgbytes = pack_image_meta_header(
@@ -2386,17 +2386,17 @@ def build_heartbeat_payload():  # HARD limit is 50 bytes
 
     radio_succ_count = radio_sent_succ_count + radio_recd_succ_count
     radio_fail_count = radio_sent_fail_count + radio_recd_err_count + radio_recd_crcerr_count + radio_recd_hasherr_count
-    
+
     signal_strength = 0
     network_type = 0 # 1 byte data
     is_cc_unit = 0 # 1 byte data
     free_memory = get_free_memory() # 2 bytes data
     device_uptime = get_uptime_minutes() # 2 bytes data, in minutes, max value 43200 got 30 days
-    
+
     if internet_module:
         signal_strength = internet_module.get_last_signal_strength() or 0
         network_type = internet_module.get_last_network_type() or 0
-    
+
     if running_as_cc():
         is_cc_unit = 1
 
@@ -2995,7 +2995,12 @@ class AppHandler:
             total_size = len(img_bytes)
             CHUNK_SIZE = 4096
             total_chunks = (total_size + CHUNK_SIZE - 1) // CHUNK_SIZE
-            app_controller.create_and_send_message("image_transfer_start",{"total_size": total_size,"total_chunks": total_chunks,}, timeout=1.0)
+            img_md5 = ubinascii.hexlify(hashlib.md5(img_bytes).digest()).decode()
+            app_controller.create_and_send_message(
+                "image_transfer_start",
+                {"total_size": total_size, "total_chunks": total_chunks, "md5": img_md5},
+                timeout=1.0,
+            )
 
             for chunk_index in range(total_chunks):
                 start = chunk_index * CHUNK_SIZE
@@ -3006,8 +3011,12 @@ class AppHandler:
                 app_controller.create_and_send_message("image_transfer_chunk",{"chunk_index": chunk_index, "chunk_size": end - start, "data": chunk_b64_str},timeout=5.0)
                 await asyncio.sleep(0)
 
-            app_controller.create_and_send_message( "image_transfer_end", {"total_size": total_size, "total_chunks": total_chunks,},timeout=1.0)
-            logger.info(f"[verify_image] Sent verify image: {round(total_size/1024)} bytes in {total_chunks} chunks")
+            app_controller.create_and_send_message(
+                "image_transfer_end",
+                {"total_size": total_size, "total_chunks": total_chunks, "md5": img_md5},
+                timeout=1.0,
+            )
+            logger.info(f"[verify_image] Sent verify image: {round(total_size/1024)} bytes in {total_chunks} chunks (md5={img_md5})")
             return True
 
         except Exception as e:
@@ -3075,7 +3084,7 @@ async def main():
 
     # HEALTH STATS ===>
     asyncio.create_task(periodic_health_stats_loop())
-    
+
     await init_tracx_internet()
     asyncio.create_task(keep_checking_internet())
 

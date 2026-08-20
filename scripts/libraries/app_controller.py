@@ -8,6 +8,7 @@ import os
 import network
 import uselect as select
 import ubinascii
+import hashlib
 WIFI_COMM_PORT_MAP = {
         216: 5001,
         217: 5002,
@@ -894,9 +895,20 @@ class AppController:
         try:
             filename = image_path.split("/")[-1]
 
+            md5_hash = hashlib.md5()
+            with open(image_path, "rb") as f:
+                while True:
+                    bytes_read = f.readinto(self.file_transfer_buffer)
+                    if bytes_read == 0:
+                        break
+                    md5_hash.update(self.file_transfer_buffer[:bytes_read])
+            img_md5 = ubinascii.hexlify(md5_hash.digest()).decode()
+            logger.info(f"[IMAGE_TRANSFER] Sending {filename} (md5={img_md5})")
+
             start_msg_data = {
                 "file_name": filename,
                 "file_path": image_path,
+                "md5": img_md5,
             }
             self.create_and_send_message("image_transfer_start", start_msg_data, timeout=1.0)
 
@@ -929,6 +941,7 @@ class AppController:
                 "file_name": filename,
                 "file_path": image_path,
                 "total_chunks": chunk_index,
+                "md5": img_md5,
             }
             self.create_and_send_message("image_transfer_end", end_msg_data, timeout=1.0)
 
