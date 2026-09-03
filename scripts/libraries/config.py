@@ -54,6 +54,7 @@ PVT_KEYS = {
 
 # Map board UID (hex bytes) to node address.
 UID_TO_ADDR = {
+    b'e076465dd7090d1d': 216,
     b'e076465dd7193d2a': 217,
     b"e076465dd709102e": 218,
     b"04bd545dd7593b40": 219, # 04bd545dd7593b40
@@ -96,7 +97,7 @@ my_addr = UID_TO_ADDR.get(uid)
 # 02.00.4
 major = 2  # (0-63)
 minor = 2  # (0-99)
-patch = 4  # (0-9)
+patch = 6  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
@@ -228,6 +229,13 @@ def get_machine_id():
         return my_addr
     else:
         return None
+
+def get_machine_port():
+    machine_id = get_machine_id()
+    if machine_id:
+        return 5000 + machine_id
+    else:
+        return 5000
 
 def set_machine_id(id):
     set_key_value('machine_id', id)

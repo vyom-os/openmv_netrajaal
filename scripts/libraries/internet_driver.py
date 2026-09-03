@@ -52,18 +52,20 @@ except ImportError:
 # Configuration
 UART_ID = 1
 BAUDRATE = 115200
-MODULE_HEALTH_INTERVAL_SEC = 10 * 60  # 10 minutes
-SIM_RECHECK_INTERVAL_SEC = 120 * 60  # 120 minutes
-RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
-INTERNET_RETRY_INTERVAL_SEC = 60 * 60  # 60 minutes
+UART_HEALTH_INTERVAL_SEC = 10 * 60  # 10 minutes
+SIM_UNDETECTED_INTERVAL_SEC = 120 * 60  # 2 hours
+FAILED_RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_CC = 60 * 60  # 60 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT = 240 * 60  # 60 minutes
+SUCCESS_INTERNET_RETRY_INTERVAL_SEC = 240 * 60  # 4 hours
 
 
-GSM_RST_PIN = "P9"       # OpenMV pin wired to EC200 RESET_N (active-low)
+GSM_RST_PIN = "P11"      # OpenMV pin wired to EC200 RESET_N (active-low)
 GSM_RST_HOLD_MS = 400    # Quectel min ~150–300 ms; 400 ms is a safe pulse
 
 
 def hardware_reset_gsm(hold_ms=None):
-    """Pulse EC200 RESET_N on OpenMV P9 (active-low). No InternetDriver needed.
+    """Pulse EC200 RESET_N on OpenMV P11 (active-low). No InternetDriver needed.
 
     Idle = HIGH (released). Pulse LOW for hold_ms, then release HIGH.
     AT/PDP/HTTP state is wiped — call establish_internet() afterwards.
@@ -265,10 +267,14 @@ class InternetDriver(InternetUtils):
             self._last_fail_count = 0
             self.is_busy = False
 
+            # state variables
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False  # is sim present and ready for use
             self.configured = False  # module heath is not good, internet might be issue
             self.has_internet = False  # is internet connection established
+            self.is_cc_enabled = True  # if false device will act as unit node
+            
+            # network variables
             self.signal_strength = 0
             self.network_type = NW_TYPE_UNKNOWN
             self.network_status = NW_STATUS_UNKNOWN
@@ -280,6 +286,7 @@ class InternetDriver(InternetUtils):
             self.has_sim = False
             self.configured = False
             self.has_internet = False
+            self.is_cc_enabled = True
 
     # ------------------------------------------------------------------
     # Core UART helpers
@@ -480,7 +487,7 @@ class InternetDriver(InternetUtils):
         await asyncio.sleep(0.2)
 
     def reset_module(self, hold_ms=None):
-        """Hardware-reset EC200 via RESET_N on P9 (active-low).
+        """Hardware-reset EC200 via RESET_N on P11 (active-low).
 
         Pulses RESET_N low then releases. Module AT/PDP/HTTP state is lost;
         call establish_internet() (or init_tracx_internet() from main) after.
@@ -718,12 +725,42 @@ class InternetDriver(InternetUtils):
     # ============================================================
     # STATE FUNCTIONS (CC/unit role, signal, network status)
     # ============================================================
+    
+    def internet_established(self):
+        return bool(self.has_internet)
 
     def running_as_cc(self):
-        return bool(self.has_internet)
+        return bool(self.has_internet and self.is_cc_enabled)
 
     def running_as_unit(self):
         return not self.running_as_cc()
+
+    def cc_enabled(self):
+        return bool(self.is_cc_enabled)
+    
+    
+    def get_module_status(self):
+        """Return is device has internet, if not what is the error"""
+        if not self.module_ready:
+            return False, "MODULE NOT READY"
+        if not self.has_sim:
+            return False, "SIM NOT READY"
+        if not self.configured:
+            return False, "MODULE NOT CONFIGURED"
+        if not self.has_internet:
+            return False, "INTERNET NOT ESTABLISHED"
+        return True, None
+        
+    def get_cc_enabled(self):
+        return bool(self.is_cc_enabled)
+
+    def set_cc_enabled(self, is_cc_enabled):
+        if is_cc_enabled:
+            self.is_cc_enabled = True
+            logger.info("[CELL] ✔✔✔ CC enabled")
+        else:
+            self.is_cc_enabled = False
+            logger.info("[CELL] ✔✔✔ CC disabled")
 
     def save_signal_strength(self, signal_strength):
         try:
