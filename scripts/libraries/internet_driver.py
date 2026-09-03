@@ -1,10 +1,12 @@
 import time
+import gc
 import utime
 from config import (
     get_my_addr,
     led_restart_blinker,
     ENCRYPTION_ENABLED,
     uses_hybrid_encryption,
+    get_wifi_creds,
 )
 import os
 import machine
@@ -15,6 +17,11 @@ import uasyncio as asyncio
 from message_codec import build_heartbeat_payload
 from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
+import network
+import requests
+import json
+
+EVENT_URL = "https://api.vyomiq.io/watchmen-detect/"
 
 try:
     import logger
@@ -52,10 +59,15 @@ except ImportError:
 # Configuration
 UART_ID = 1
 BAUDRATE = 115200
-MODULE_HEALTH_INTERVAL_SEC = 10 * 60  # 10 minutes
-SIM_RECHECK_INTERVAL_SEC = 120 * 60  # 120 minutes
-RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
-INTERNET_RETRY_INTERVAL_SEC = 60 * 60  # 60 minutes
+UART_HEALTH_INTERVAL_SEC = 30 * 60  # 30 minutes
+SIM_UNDETECTED_INTERVAL_SEC = 30 * 60  # 30 minutes
+FAILED_RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
+
+FAILED_INTERNET_RETRY_INTERVAL_SEC_WIFI = 30 * 60  # 0 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_CC = 30 * 60  # 0 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT = 180 * 60  # 60 minutes
+
+SUCCESS_INTERNET_RETRY_INTERVAL_SEC = 180 * 60  # 3 hours
 
 
 GSM_RST_PIN = "P9"       # OpenMV pin wired to EC200 RESET_N (active-low)
@@ -264,11 +276,32 @@ class InternetDriver(InternetUtils):
             self._upload_fail_count = 0
             self._last_fail_count = 0
             self.is_busy = False
+            self.install_mode = False
 
+            wifi_ssid, wifi_password = get_wifi_creds()
+            if wifi_ssid and wifi_password:
+                self.wifi_ssid = wifi_ssid
+                self.wifi_password = wifi_password
+                logger.info(f"[WIFI] ✔✔✔ WiFi creds loaded from store: {self.wifi_ssid}")
+            else:
+                self.wifi_ssid = "amardeep"
+                self.wifi_password = "85858585"
+                logger.info("[WIFI] ✘✘✘ WiFi creds not found in store, using defaults")
+
+            # gsm variables
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False  # is sim present and ready for use
-            self.configured = False  # module heath is not good, internet might be issue
+            self.gsm_configured = False  # module heath is not good, internet might be issue
+
+            # wifi variables
+            self.wifi_connected = False
+            self.wifi_nic = None
+
+            # internet variables
             self.has_internet = False  # is internet connection established
+            self.is_cc_enabled = True  # if false device will act as unit node
+            
+            # network variables
             self.signal_strength = 0
             self.network_type = NW_TYPE_UNKNOWN
             self.network_status = NW_STATUS_UNKNOWN
@@ -278,8 +311,10 @@ class InternetDriver(InternetUtils):
             print(f"Error in InternetDriver init: {e}")
             self.module_ready = False
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
+            self.wifi_connected = False
             self.has_internet = False
+            self.is_cc_enabled = True
 
     # ------------------------------------------------------------------
     # Core UART helpers
@@ -492,11 +527,11 @@ class InternetDriver(InternetUtils):
         ok = hardware_reset_gsm(hold_ms=hold_ms)
         self.module_ready = False
         self.has_sim = False
-        self.configured = False
+        self.gsm_configured = False
         self.has_internet = False
         return ok
 
-    async def _configure_module(self):
+    async def _configure_gsm_module(self, stop_http=False):
         """One-time module configuration.
 
         Returns:
@@ -521,7 +556,7 @@ class InternetDriver(InternetUtils):
         if not await self._check_at_command_response():
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
             await self._enter_sleep()
             return False, "Module configuration error: Failed to get AT response"
         print("[CELL] [Step 1/4] ✔✔✔ AT command response received")
@@ -529,33 +564,127 @@ class InternetDriver(InternetUtils):
         print("[CELL] Checking SIM health...")
         if not await self._check_sim():
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
             await self._enter_sleep()
             return False, "Module configuration error: SIM not ready"
         print("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
 
         print("[CELL] Activating PDP context...")
         if not await self._activate_pdp_data_context(1):
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: Failed to activate PDP context"
         print("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
+        
+        if stop_http:
+            print("[CELL] Stopping previous HTTP context...")
+            await self._http_stop()
+            print("[CELL] [Step 3.2/4] ✔✔✔ Previous HTTP context stopped")
 
         print("[CELL] Configuring HTTP context...")
         if not await self._configure_http_context():
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: Failed to configure HTTP context"
         print("[CELL] [Step 4/4] ✔✔✔ HTTP context configured")
 
         self.module_ready = True
         self.has_sim = True
-        self.configured = True
+        self.gsm_configured = True
         print("✔✔✔ EC200 module configured successfully")
         return True, None
+
+    async def _configure_wifi_module(self):
+        """Connect to WiFi and mark the module as configured.
+
+        Returns:
+            bool: True on successful configuration, False on failure.
+            error: Message or Error message in case of success and failure
+        """
+        try:
+            self.wifi_connected = False
+            if self.install_mode:
+                logger.info("[WIFI] WiFi is in install mode, skipping WiFi configuration")
+                return False, "WiFi is in install mode, skipping WiFi configuration"
+            
+            logger.info(f"[WIFI] Initializing WiFi connection to SSID: {self.wifi_ssid}")
+            self.wifi_nic = network.WLAN(network.WLAN.IF_STA)
+            self.wifi_nic.active(True)
+
+            logger.info(f"[WIFI] Connecting to WiFi network: {self.wifi_ssid}")
+            self.wifi_nic.connect(self.wifi_ssid, self.wifi_password)
+
+            max_wait = 20
+            wait_count = 0
+            while wait_count < max_wait:
+                if self.wifi_nic.isconnected():
+                    ifconfig = self.wifi_nic.ifconfig()
+                    logger.info(
+                        f"[WIFI] WiFi connected successfully!, IP add: {ifconfig[0]}, "
+                        f"Subnet mask: {ifconfig[1]}, Gateway: {ifconfig[2]}, DNS: {ifconfig[3]}"
+                    )
+                    self.wifi_connected = True
+                    return True, None
+
+                try:
+                    status = self.wifi_nic.status()
+                    if hasattr(network.WLAN, "STAT_WRONG_PASSWORD") and status == network.WLAN.STAT_WRONG_PASSWORD:
+                        logger.info("[WIFI] Connection failed: Wrong password")
+                        self.wifi_nic.active(False)
+                        self.wifi_connected = False
+                        return False, "WiFi connection failed: Wrong password"
+                    elif hasattr(network.WLAN, "STAT_NO_AP_FOUND") and status == network.WLAN.STAT_NO_AP_FOUND:
+                        logger.info("[WIFI] Connection failed: Access point not found")
+                        self.wifi_nic.active(False)
+                        self.wifi_connected = False
+                        return False, "WiFi connection failed: Access point not found"
+                    elif hasattr(network.WLAN, "STAT_CONNECT_FAIL") and status == network.WLAN.STAT_CONNECT_FAIL:
+                        logger.info("[WIFI] Connection failed: Connection failed")
+                        self.wifi_nic.active(False)
+                        self.wifi_connected = False
+                        return False, "WiFi connection failed"
+                    logger.info(f"[WIFI] Connecting... (status: {status}, wait: {wait_count}s)")
+                except Exception as e:
+                    logger.warning(f"[WIFI] error in Connecting... (wait: {wait_count}s) : {e}")
+
+                await asyncio.sleep(1)
+                wait_count += 1
+
+            logger.error(f"[WIFI] Wifi connection timeout after {max_wait} seconds")
+            self.wifi_nic.active(False)
+            self.wifi_connected = False
+            return False, f"WiFi connection timeout after {max_wait} seconds"
+
+        except Exception as e:
+            logger.error(f"[WIFI] error in initialization: {e}")
+            self.wifi_connected = False
+            if self.wifi_nic:
+                try:
+                    self.wifi_nic.active(False)
+                except:
+                    pass
+            return False, f"WiFi initialization error: {e}"
+        
+    def _stop_wifi(self):
+        try:
+            self.wifi_connected = False
+            if self.wifi_nic:
+                self.wifi_nic.active(False)
+                logger.info("[WIFI] WiFi stopped for internet connection")
+            else:
+                logger.info("[WIFI] WiFi already stopped for internet connection")
+        except Exception as e:
+            logger.error(f"[WIFI] error in stopping WiFi for internet connection: {e}")
 
     async def check_module_health(self):
         """
         Check module health by sending AT command and checking response.
         """
+        if self.wifi_connected:
+            if self.wifi_nic and self.wifi_nic.isconnected():
+                logger.info("[WIFI] Module health check passed")
+                return True
+            self.wifi_connected = False
+            logger.error("[WIFI] Module health check failed: WiFi not connected")
+            return False
         if not await self._check_at_command_response(retries=2):
             logger.error("[CELL] Module health check failed: Failed to send AT command")
             return False
@@ -570,13 +699,25 @@ class InternetDriver(InternetUtils):
         init_ok = False
         init_error = None
         for attempt in range(1, retry_count+1):
-            init_success, init_error = await self._configure_module()
+            init_success, init_error = await self._configure_gsm_module()
             if init_success:
                 init_ok = True
+                self._stop_wifi()
                 break
             print(f"[CELL] Internet init failed (attempt {attempt}/{retry_count}): {init_error}")
             if attempt < retry_count:
                 await asyncio.sleep(2)
+
+        if not init_ok:
+            for attempt in range(1, retry_count+1):
+                init_success, init_error = await self._configure_wifi_module()
+                if init_success:
+                    init_ok = True
+                    break
+                print(f"[CELL] Internet init failed (attempt {attempt}/{retry_count}): {init_error}")
+                if attempt < retry_count:
+                    await asyncio.sleep(2)
+
         if not init_ok:
             self.has_internet = False
             print(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
@@ -604,6 +745,16 @@ class InternetDriver(InternetUtils):
         Combines CEREG(LTE) or CGREG(3G/2G PS) + QIACT into a single pass; skips the bare AT ping
         (CEREG already proves the module is alive and responding).
         """
+        if self.wifi_connected:
+            self.save_network_type(NW_TYPE_UNKNOWN)
+            self.save_network_status(NW_STATUS_UNKNOWN)
+            if self.wifi_nic and self.wifi_nic.isconnected():
+                print("[WIFI] Connection is healthy")
+                return True
+            self.wifi_connected = False
+            print("[WIFI] Connection not healthy: WiFi dropped")
+            return False
+
         # AT+CEREG proves the module is alive AND confirms LTE data registration
         success, resp = await self._send_command("AT+CEREG?", timeout=4)
         if not success:
@@ -650,9 +801,20 @@ class InternetDriver(InternetUtils):
             elapsed_ms = time.ticks_diff(now_ms, self._last_recovery_fail_ticks)
             if elapsed_ms < recovery_cooldown_sec * 1000:
                 return False, "Connection failed (recovery cooldown)"
+        if self.wifi_connected:
+            print("[WIFI] Connection not healthy, attempting to recover...")
+            await asyncio.sleep(2)
+            init_success, init_error = await self._configure_wifi_module()
+            if not init_success:
+                self._last_recovery_fail_ticks = now_ms
+                return False, f"WiFi configuration failed: {init_error}"
+            if not await self._check_network_healthy():
+                self._last_recovery_fail_ticks = now_ms
+                return False, "WiFi connection failed"
+            return True, None
         print("[CELL] Connection not healthy, attempting to recover...")
         await asyncio.sleep(2)
-        init_success, init_error = await self._configure_module()
+        init_success, init_error = await self._configure_gsm_module()
         if not init_success:
             self._last_recovery_fail_ticks = now_ms
             return False, f"Configuration failed: {init_error}"
@@ -715,15 +877,53 @@ class InternetDriver(InternetUtils):
 
         return None
 
+    async def get_wifi_signal_strength(self):
+        """Dummy WiFi RSSI — always reports 50% until a real NIC read is added."""
+        return 50
+
     # ============================================================
     # STATE FUNCTIONS (CC/unit role, signal, network status)
     # ============================================================
+    
+    def internet_established(self):
+        return bool(self.has_internet)
 
     def running_as_cc(self):
-        return bool(self.has_internet)
+        return bool(self.has_internet and self.is_cc_enabled)
 
     def running_as_unit(self):
         return not self.running_as_cc()
+
+    def cc_enabled(self):
+        return bool(self.is_cc_enabled)
+    
+    
+    def get_module_status(self):
+        """Return is device has internet, if not what is the error"""
+        if self.wifi_connected:
+            if not self.has_internet:
+                return False, "INTERNET NOT ESTABLISHED"
+            return True, None
+        if not self.module_ready:
+            return False, "MODULE NOT READY"
+        if not self.has_sim:
+            return False, "SIM NOT READY"
+        if not self.gsm_configured:
+            return False, "MODULE NOT CONFIGURED"
+        if not self.has_internet:
+            return False, "INTERNET NOT ESTABLISHED"
+        return True, None
+        
+    def get_cc_enabled(self):
+        return bool(self.is_cc_enabled)
+
+    def set_cc_enabled(self, is_cc_enabled):
+        if is_cc_enabled:
+            self.is_cc_enabled = True
+            logger.info("[CELL] ✔✔✔ CC enabled")
+        else:
+            self.is_cc_enabled = False
+            logger.info("[CELL] ✔✔✔ CC disabled")
 
     def save_signal_strength(self, signal_strength):
         try:
@@ -780,17 +980,14 @@ class InternetDriver(InternetUtils):
     async def upload_data(
         self, data, url, headers=None, input_timeout=20, response_timeout=20
     ):
-        """
-        Make a POST request with minimised per-request overhead.
+        """POST JSON (or string) to `url` over cellular HTTP (Quectel QHTTP*).
 
-        Key optimisations vs. original:
-        - Health check runs every _health_check_interval uploads (not every time).
-        - Signal strength is logged every _health_check_interval uploads (not every time).
-        - HTTP context is configured once and cached (_http_context_configured flag).
-        - drain_sleep reduced (150 ms vs 500 ms).
-        - Poll sleep reduced (20 ms vs 100 ms).
-        - Settling gap after URL removed (was 300 ms dead sleep).
-        - URL OK-wait loop uses the same fast _read_response helper.
+        Returns:
+            tuple: (success, http_code, response)
+                success (bool): True if the server returned HTTP 200.
+                http_code (int): HTTP status from +QHTTPPOST, or 0 if the
+                    request never got that far (timeout, AT error, health fail).
+                response (str): QHTTPREAD body on success; error message on failure.
         """
         # --- Periodic health check (not every single upload) ---
         self.is_busy = True
@@ -807,7 +1004,10 @@ class InternetDriver(InternetUtils):
                 return False, 0, err
 
             # --- Periodic signal strength update and log ---
-            signal_pct = await self.get_signal_strength()
+            if self.wifi_connected:
+                signal_pct = await self.get_wifi_signal_strength()
+            else:
+                signal_pct = await self.get_signal_strength()
             self.save_signal_strength(signal_pct)
             nw_type = self.get_last_network_type()
             nw_status = self.get_last_network_status()
@@ -824,19 +1024,27 @@ class InternetDriver(InternetUtils):
 
         # --- HTTP context: configure once, skip on subsequent calls ---
         if self._last_fail_count >= 2:
-            await self._http_stop()
-            if not await self._configure_http_context():
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, "Failed to configure HTTP context"
+            if self.wifi_connected:
+                init_success, init_error = await self._configure_wifi_module()
+                if not init_success:
+                    self.on_upload_fail()
+                    self.is_busy = False
+                    return False, 0, f"Configuration failed: {init_error}"
+            else:
+                init_success, init_error = await self._configure_gsm_module(stop_http=True)
+                if not init_success:
+                    self.on_upload_fail()
+                    self.is_busy = False
+                    return False, 0, f"Configuration failed: {init_error}" 
 
         # --- Convert payload ---
         if isinstance(data, dict):
-            import json
-
             data = json.dumps(data)
         data_length = len(data)
-
+        
+        if self.wifi_connected:
+            return await self.wifi_upload_payload(data, url, headers)
+        
         # --- Step 1: Set URL ---
         for url_attempt in range(2):
             url_length = len(url)
@@ -849,7 +1057,7 @@ class InternetDriver(InternetUtils):
                 # PDP context was lost mid-flight - re-activate and retry once.
                 print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
                 await asyncio.sleep(2)
-                init_success, init_error = await self._configure_module()
+                init_success, init_error = await self._configure_gsm_module()
                 if not init_success:
                     self.on_upload_fail()
                     self.is_busy = False
@@ -971,6 +1179,65 @@ class InternetDriver(InternetUtils):
         self.on_upload_fail()
         self.is_busy = False
         return False, 0, "POST timeout"
+
+    async def wifi_upload_payload(self, data, url, headers=None):
+        """POST JSON (or string) to `url` over WiFi.
+
+        Returns:
+            tuple: (success, http_code, response)
+                success (bool): True if the server returned HTTP 200.
+                http_code (int): HTTP status, or 0 if the request never got that far.
+                response (str): response body on success; error message on failure.
+        """
+        if not self.wifi_nic or not self.wifi_nic.isconnected():
+            self.wifi_connected = False
+            logger.warning("[WIFI] WiFi not connected")
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "WiFi not connected"
+
+        response = None
+        response_text = None
+        try:
+            if headers is None:
+                headers = {"Content-Type": "application/json"}
+            if isinstance(data, dict):
+                data = json.dumps(data)
+            response = requests.post(url, data=data, headers=headers)
+            data = None
+            http_code = response.status_code
+
+            if http_code == 200:
+                logger.info("[WIFI] uploaded via WiFi successfully")
+                self.on_upload_success()
+                self.is_busy = False
+                return True, http_code, "OK"
+
+            try:
+                response_text = response.text
+            except:
+                response_text = ""
+            if response_text and len(response_text) > 256:
+                response_text = response_text[:256]
+            logger.error("[WIFI] upload failed: status %s, %s" % (http_code, response_text))
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, http_code, "HTTP Error: %s (%s)" % (http_code, response_text)
+        except Exception as e:
+            logger.error("[WIFI] error in wifi_upload_payload: %s" % e)
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "WiFi POST failed: %s" % e
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            response = None
+            response_text = None
+            data = None
+            gc.collect()  # This is important
 
     def on_upload_fail(self):
         self._upload_fail_count += 1
@@ -1141,9 +1408,9 @@ if __name__ == "__main__":
             time.sleep(2)
             machine.reset()
 
-        if not internet_module.configured:
-            print("Internet configuration failed! Rebooting...")
-            write_log("Internet configuration failed!, Rebooting...")
+        if not internet_module.gsm_configured and not internet_module.wifi_connected:
+            print("Internet configuration failed! or WiFi not configured! Rebooting...")
+            write_log("Internet configuration failed! WiFi not configured! Rebooting...")
             time.sleep(2)
             machine.reset()
 

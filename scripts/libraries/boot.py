@@ -28,7 +28,7 @@ from config import (
 from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes
 from sx1262 import SX1262
 from gps_driver import GPSDriver
-from internet_driver import InternetDriver, MODULE_HEALTH_INTERVAL_SEC, SIM_RECHECK_INTERVAL_SEC, RE_CONFIGURE_INTERVAL_SEC, INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
+from internet_driver import InternetDriver, UART_HEALTH_INTERVAL_SEC, SIM_UNDETECTED_INTERVAL_SEC, FAILED_RE_CONFIGURE_INTERVAL_SEC, FAILED_INTERNET_RETRY_INTERVAL_SEC_WIFI, FAILED_INTERNET_RETRY_INTERVAL_SEC_CC, FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT, SUCCESS_INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
 from _sx126x import ERR_NONE, ERR_CRC_MISMATCH, ERR_UNKNOWN, SX126X_IRQ_CRC_ERR, SX126X_IRQ_HEADER_ERR, SX126X_IRQ_RX_DONE, SX126X_IRQ_TIMEOUT, SX126X_IRQ_TX_DONE, SX126X_SYNC_WORD_PRIVATE, SX126X_IRQ_ALL, SX126X_PACKET_TYPE_LORA
 import detect
 from detect import PIR_PIN, turn_ON_IR_emitter, turn_OFF_IR_emitter
@@ -53,7 +53,7 @@ if not PRODUCTION_MODE:
     DECRYPT_IMAGE_ON_HOPS = True
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
-USE_PIR_SENSOR = False
+USE_PIR_SENSOR = True
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
 def get_rand(len=3):
@@ -353,6 +353,20 @@ def running_as_cc():
 
 def running_as_unit():
     return not running_as_cc()
+
+def before_install_mode():
+    global internet_module
+    if internet_module:
+        return internet_module.before_install_mode()
+    else:
+        return False
+
+def after_install_mode():
+    global internet_module
+    if internet_module:
+        return internet_module.after_install_mode()
+    else:
+        return False
 
 async def logger_state():
     global db_store
@@ -1718,7 +1732,7 @@ def end_chunk(msg):
 async def init_tracx_internet():
     # Input: None; Output: bool indicating cellular initialization success (updates internet_module)
     """Initialize the cellular connection"""
-    global internet_module, tracx_uart, tracx_uart_lock
+    global internet_module, tracx_uart, tracx_uart_lock, network_paths
     logger.info("\n[CELL] === Initializing Internet Module ===")
 
     # Create shared UART if not already created
@@ -1733,9 +1747,14 @@ async def init_tracx_internet():
     async with tracx_uart_lock:
         internet_module = InternetDriver(uart=tracx_uart)
         await internet_module.establish_internet()
-        if internet_module.has_internet:
-            logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet established, device will as as CC now... ❮❮ᯤᯤᯤᯤᯤᯤ")
-            return True
+        if internet_module.internet_established():
+            if internet_module.cc_enabled():
+                network_paths = []
+                logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet established, device will as as CC now... ❮❮ᯤᯤᯤᯤᯤᯤ")
+                return True
+            else:
+                logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet established, device is set as Unit Node ❮❮ᯤᯤᯤᯤᯤᯤ")
+                return True
         else:
             logger.fatal("[CELL] Internet configuration failed; will retry periodically")
             return False
@@ -1748,45 +1767,63 @@ async def re_init_tracx_internet():
     # Hold UART lock during init to avoid conflict with GPS
     async with tracx_uart_lock:
         await internet_module.establish_internet(retry_count=2)
-        if internet_module and internet_module.has_internet:
-            network_paths = []
-            logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet re-established, device will as as CC now... ❮❮ᯤᯤᯤᯤᯤᯤ")
-            return True
+        if internet_module and internet_module.internet_established():
+            if internet_module.cc_enabled():
+                network_paths = []
+                logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet re-established, device will as as CC now... ❮❮ᯤᯤᯤᯤᯤᯤ")
+                return True
+            else:
+                logger.info("[CELL] ᯤᯤᯤᯤᯤᯤ❯❯ Internet re-established, device is set as Unit Node ❮❮ᯤᯤᯤᯤᯤᯤ")
+                return True
         else:
             logger.error("[CELL] Internet re-pconfiguration failed; will retry periodically")
             return False
 
 async def keep_checking_internet():
-    """Retry establish_internet() every INTERNET_RETRY_INTERVAL_SEC while offline."""
+    """Retry establish_internet() every FAILED_INTERNET_RETRY_INTERVAL_SEC_CC while offline."""
     global internet_module, tracx_uart_lock, network_paths
 
     while True:
-        await asyncio.sleep(MODULE_HEALTH_INTERVAL_SEC)
+        await asyncio.sleep(UART_HEALTH_INTERVAL_SEC)
         await internet_module.check_module_health()
         
-        if internet_module and not internet_module.module_ready:
-            logger.error("[CELL] Internet module not ready, resetting module and re_init_tracx_internet")
+        if internet_module and not internet_module.module_ready and not internet_module.wifi_connected:
+            logger.error("[CELL] GSM and WiFi not ready, resetting module and re_init_tracx_internet")
             internet_module.reset_module()
             await re_init_tracx_internet()
-            await asyncio.sleep(MODULE_HEALTH_INTERVAL_SEC)
+            await asyncio.sleep(UART_HEALTH_INTERVAL_SEC)
             continue
         
         if internet_module and not internet_module.has_sim:
             logger.error("[CELL] SIM not detected, re-checking sim detection...")
             await re_init_tracx_internet()
-            await asyncio.sleep(SIM_RECHECK_INTERVAL_SEC)
+            await asyncio.sleep(SIM_UNDETECTED_INTERVAL_SEC)
             continue
         
         if internet_module and not internet_module.configured:
             logger.error("[CELL] module not configured, re-conguring module...")
             await re_init_tracx_internet()
-            await asyncio.sleep(RE_CONFIGURE_INTERVAL_SEC)
+            await asyncio.sleep(FAILED_RE_CONFIGURE_INTERVAL_SEC)
             continue
 
-        if internet_module and not internet_module.has_internet:
+        if internet_module and not internet_module.internet_established():
             logger.error("[CELL] Internet not connected, re-checking internet...")
             await re_init_tracx_internet()
-            await asyncio.sleep(INTERNET_RETRY_INTERVAL_SEC)
+            if internet_module.get_cc_enabled():
+                if internet_module.wifi_connected:
+                    interval = FAILED_INTERNET_RETRY_INTERVAL_SEC_WIFI
+                else:
+                    interval = FAILED_INTERNET_RETRY_INTERVAL_SEC_CC
+            else:
+                interval = FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT
+            await asyncio.sleep(interval)
+            continue
+        
+        logger.info(f"[CELL] Internet connected, will recheck after {SUCCESS_INTERNET_RETRY_INTERVAL_SEC/3600} hours...")
+        await asyncio.sleep(SUCCESS_INTERNET_RETRY_INTERVAL_SEC)
+        if internet_module and internet_module.internet_established():
+            logger.error(f"[CELL] Internet connected, still rechecking after {SUCCESS_INTERNET_RETRY_INTERVAL_SEC/3600} hours...")
+            await re_init_tracx_internet()
             continue
 
 async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
@@ -2212,9 +2249,9 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"warning cleaning up image: {e}, can be ignored...")
                     led.off()
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 300)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
         except Exception as e:
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 300)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
             logger.error(f"[PIR] unexpected error in event taking and saving: {e}")
 
         finally:
@@ -2613,7 +2650,7 @@ def build_heartbeat_payload():  # HARD limit is 50 bytes
 
     hbmsg_bytes += int_to_nbytes(radio_succ_count, 3)
     hbmsg_bytes += int_to_nbytes(radio_fail_count, 3)
-    if internet_module and internet_module.configured:
+    if internet_module and (internet_module.gsm_configured or internet_module.wifi_connected):
         hbmsg_bytes += int_to_nbytes(internet_module.get_upload_success_count(), 3)
         hbmsg_bytes += int_to_nbytes(internet_module.get_upload_fail_count(), 3)
     else:
@@ -3129,10 +3166,10 @@ class AppHandler:
                 app_controller.create_and_send_message("verify_internet", {"message": "Now established, device will act as CC now", "result": "pass"}, timeout=0.5)
                 return True
             else:
-                app_controller.create_and_send_message("verify_internet", {"message": f"Failed to create CC", "result": "fail"}, timeout=0.5)
+                app_controller.create_and_send_message("verify_internet", {"message": f"Failed to Establish Internet!", "result": "fail"}, timeout=0.5)
                 return False
         except Exception as e:
-            app_controller.create_and_send_message("verify_internet", {"message": f"Error while configuring internet connection", "result": "fail"}, timeout=0.5)
+            app_controller.create_and_send_message("verify_internet", {"message": f"Error while Establishing Internet!", "result": "fail"}, timeout=0.5)
             logger.error(f"[try_create_cc] error in try_create_cc: {e}")
             return False
 
@@ -3353,9 +3390,14 @@ async def main():
     if SAVE_LOGS:
         asyncio.create_task(logger_state())
 
-    await asyncio.sleep(15 * 60)  # 15 minutes
-    logger.info("============= >>>>>> Rebooting device after 15 minutes <<<<<<< ====================")
-    await reboot_device()
+    for i in range(24*7*8):  # total 8 weeks runtime
+        await asyncio.sleep(3600)
+        logger.info(f"Finished HOUR {i}")
+        if i >= 6:
+            logger.error(f"============= >>>>>> Rebooting device since it has been {i} HOURS <<<<<<< ====================")
+            await reboot_device()
+    logger.info("꩜꩜꩜꩜꩜꩜ main loop completed * ꩜꩜꩜꩜꩜꩜")
+    await reboot_device()  # restart after 8 weeks
 
 
 try:

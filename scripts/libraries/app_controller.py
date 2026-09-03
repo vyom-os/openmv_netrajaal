@@ -1038,13 +1038,13 @@ class AppController:
             if force_upload:
                 ok = await self.apphandler.try_create_cc()
                 if ok:
-                    self.create_and_send_message("verify_internet", {"message": "CC created successfully", "result": "pass"}, timeout=0.5)
+                    self.create_and_send_message("verify_internet", {"message": "Internet Established!", "result": "pass"}, timeout=0.5)
                 else:
-                    self.create_and_send_message("verify_internet", {"message": "Failed to create CC", "result": "fail"}, timeout=0.5)
+                    self.create_and_send_message("verify_internet", {"message": "Failed to Establish Internet!", "result": "fail"}, timeout=0.5)
                     return False
             else:
                 self.create_and_send_message("verify_internet", {"message": "checking internet connection"}, timeout=0.5)
-                self.create_and_send_message("verify_internet", {"message": "not running as CC", "result": "fail"}, timeout=0.5)
+                self.create_and_send_message("verify_internet", {"message": "Internet not Establish!", "result": "fail"}, timeout=0.5)
                 return False
         try:
             self.create_and_send_message("verify_internet", {"message": "checking internet connection"}, timeout=0.5)

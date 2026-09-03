@@ -54,6 +54,7 @@ PVT_KEYS = {
 
 # Map board UID (hex bytes) to node address.
 UID_TO_ADDR = {
+    b'e606fe64d7093842': 216,
     b'e076465dd7193d2a': 217,
     b"e076465dd709102e": 218,
     b"04bd545dd7593b40": 219, # 04bd545dd7593b40
@@ -96,7 +97,7 @@ my_addr = UID_TO_ADDR.get(uid)
 # 02.00.4
 major = 2  # (0-63)
 minor = 2  # (0-99)
-patch = 4  # (0-9)
+patch = 5  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
@@ -204,6 +205,24 @@ def get_gps_location():
             set_key_value('gps_location', None)
             return None, None, 0
     return None, None, 0
+
+def set_wifi_creds(ssid=None, password=None):
+    try:
+        set_key_value('wifi_creds', {'ssid': ssid, 'password': password})
+    except Exception as e:
+        print(f"Error in set_wifi_creds: {str(e)}")
+        set_key_value('wifi_creds', None)
+
+def get_wifi_creds():
+    wifi_creds = get_key_value('wifi_creds')
+    if wifi_creds is None:
+        return None, None
+    try:
+        return wifi_creds.get('ssid'), wifi_creds.get('password')
+    except Exception as e:
+        print(f"Error in get_wifi_creds: {str(e)}")
+        set_key_value('wifi_creds', None)
+        return None, None
 
 def get_machine_uid():
     """Return unique machine UID"""
