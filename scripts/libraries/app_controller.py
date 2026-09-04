@@ -9,49 +9,6 @@ import network
 import uselect as select
 import ubinascii
 import hashlib
-WIFI_COMM_PORT_MAP = {
-        216: 5001,
-        217: 5002,
-        218: 5003,
-        219: 5004,
-        220: 5005,
-        221: 5006,
-        222: 5007,
-        223: 5008,
-        224: 5009,
-        225: 5010,
-        226: 5011,
-        227: 5012,
-        228: 5013,
-        229: 5014,
-        230: 5015,
-        231: 5016,
-        232: 5017,
-        233: 5018,
-        234: 5019,
-        235: 5020,
-        236: 5021,
-        237: 5022,
-        238: 5023,
-        239: 5024,
-        240: 5025,
-        241: 5026,
-        242: 5027,
-        243: 5028,
-        244: 5029,
-        245: 5030,
-        246: 5031,
-        247: 5032,
-        248: 5033,
-        249: 5034,
-        250: 5035,
-        251: 5036,
-        252: 5037,
-        253: 5038,
-        254: 5039,
-        255: 5040,
-        256: 5041,
-        }
         
 # Auto-disconnect WiFi + app TCP session after this many seconds (from successful socket connect).
 WIFI_SOCKET_SESSION_TIMEOUT_S = 600
@@ -82,12 +39,7 @@ class AppController:
         self.wifi_ssid = "vyom"
         self.wifi_password = "12345678"
 
-        if my_addr not in WIFI_COMM_PORT_MAP:
-            logger.error(f"{my_addr} NOT in Port Map Yet")
-            self.wifi_comm_port = 0
-        else:
-            self.wifi_comm_port = WIFI_COMM_PORT_MAP[my_addr]
-
+        self.machine_port = None
         self.wifi_socket = None
         self.wifi_nic = None
         self.last_connection_attempt_time = 0
@@ -131,7 +83,7 @@ class AppController:
     # High-level control: start/stop/app_alive
     # -------------------------------------------------------------------------
 
-    async def start(self):
+    async def start(self, machine_port):
         """
         Start WiFi + app communication:
         - Initialize WiFi (STA) if debugging is enabled.
@@ -139,6 +91,7 @@ class AppController:
         - Start socket read loop task.
         """
         self.is_running = True
+        self.machine_port = machine_port
         # self.wifi_socket_read_loop()
         # asyncio.create_task(self.wifi_socket_read_loop())
         loop = asyncio.get_event_loop()
@@ -214,7 +167,7 @@ class AppController:
                 if self.wifi_nic.isconnected():
                     ip = self.wifi_nic.ifconfig()[0]
                     self._init_socket_connection()
-                    logger.info(f"[WIFI] Connected, IP: {ip}")
+                    logger.info(f"[WIFI] Connected, IP: {ip}, socket port: {self.machine_port}")
                     return True
 
                 logger.info(
@@ -393,6 +346,11 @@ class AppController:
         """
         Initialize or re-initialize the WiFi socket connection to the hotspot server.
         """
+        machine_port = self.machine_port
+        if machine_port is None:
+            logger.error("[WIFI] Socket port not set, cannot initialize socket connection")
+            return False
+
         if self.wifi_nic is None or not self.wifi_nic.isconnected():
             print("WARNING - WiFi not connected, cannot initialize socket connection")
             if self.wifi_nic:
@@ -424,10 +382,10 @@ class AppController:
                     sock.settimeout(5)
 
                     print(
-                        f"Connecting to {target_ip}:{self.wifi_comm_port}"
+                        f"Connecting to {target_ip}:{machine_port}"
                         f" (attempt {attempt + 1}/{max_retries})"
                     )
-                    sock.connect((target_ip, self.wifi_comm_port))
+                    sock.connect((target_ip, machine_port))
                     new_socket = sock
                     break
                 except Exception as e:
@@ -447,7 +405,7 @@ class AppController:
                 self._last_recv_time = time.time()
                 print(
                     f"info - WiFi communication enabled, "
-                    f"connected to {target_ip}:{self.wifi_comm_port}"
+                    f"connected to {target_ip}:{machine_port}"
                 )
                 self.cont_socket_fail_count = 0
                 self.update_hbstatus()
@@ -1032,11 +990,11 @@ class AppController:
     # verify_internet (CC only: capture image, upload to server, inform app)
     # -------------------------------------------------------------------------
 
-    async def _handle_verify_internet(self, force_upload=False): # if force_upload = True and this unit node,, first call internet_module.establish_internet(retry_count=2), then rest if same
+    async def _try_internet_establish(self, force_upload=False): # if force_upload = True and this unit node,, first call internet_module.establish_internet(retry_count=2), then rest if same
         is_cc = self.apphandler.is_cc()
         if not is_cc:
             if force_upload:
-                ok = await self.apphandler.try_create_cc()
+                ok = await self.apphandler.try_internet_establish()
                 if ok:
                     self.create_and_send_message("verify_internet", {"message": "Internet Established!", "result": "pass"}, timeout=0.5)
                 else:
@@ -1057,7 +1015,8 @@ class AppController:
                 ok = await run_fn()
                 upload_duration = max(time.ticks_diff(time.ticks_ms(), s) / 1000.0, 1e-6)
                 if ok:
-                    self.create_and_send_message("verify_internet", {"message": f"upload succeeded in {upload_duration:.3f} seconds", "result": "pass"}, timeout=0.5)
+                    get_cc_enabled_result = self.apphandler.get_cc_enabled()
+                    self.create_and_send_message("verify_internet", {"message": f"upload succeeded in {upload_duration:.3f} seconds", "result": "pass", "cc_enabled": get_cc_enabled_result}, timeout=0.5)
                 else:
                     self.create_and_send_message("verify_internet", {"message": f"upload failed after {upload_duration:.3f} seconds", "result": "fail"}, timeout=0.5)
             except Exception as e:
@@ -1073,6 +1032,19 @@ class AppController:
                 self.create_and_send_message("check_network", {"message": "Network scan failed", "result": "fail"}, timeout=0.5)
         except Exception as e:
             self.create_and_send_message("check_network", {"message": f"Network scan failed: {e}", "result": "fail"}, timeout=0.5)
+
+    async def _get_internet_module_status(self):
+        try:
+            self.create_and_send_message("get_internet_module_status", {"message": "Getting module status"}, timeout=0.5)
+            get_internet_module_status_result, error_message = self.apphandler.get_internet_module_status()
+            print("get_internet_module_status_result in app_controller: ", get_internet_module_status_result)
+            if error_message is not None:
+                self.create_and_send_message("get_internet_module_status", {"message": error_message, "result": "fail"}, timeout=0.5)
+            else:
+                get_cc_enabled_result = self.apphandler.get_cc_enabled()
+                self.create_and_send_message("get_internet_module_status", {"message": "Module status succeeded", "result": "pass", "cc_enabled": get_cc_enabled_result}, timeout=0.5)
+        except Exception as e:
+            self.create_and_send_message("get_internet_module_status", {"message": f"Module status failed: {e}", "result": "fail"}, timeout=0.5)
     # -------------------------------------------------------------------------
     # Message / command handling
     # -------------------------------------------------------------------------
@@ -1118,19 +1090,19 @@ class AppController:
 
     def handle_command(self, message):
         command = message.get("data")
+        logger.info(f"received command: {message}")
         if command == "show_status":
             self.update_hbstatus()
             self.recv_timeout = 2.0
         elif command == "verify_internet":
-            logger.info(f"received command: {message}")
             try:
-                asyncio.create_task(self._handle_verify_internet())
+                asyncio.create_task(self._get_internet_module_status())
             except Exception as e:
-                logger.error(f"[verify_internet] Failed to create task: {e}")
+                print(f"[verify_internet] Failed to create task: {e}")
         elif command == "try_create_cc":
             logger.info(f"received command: {message}")
             try:
-                asyncio.create_task(self._handle_verify_internet(force_upload=True))
+                asyncio.create_task(self._try_internet_establish(force_upload=True))
             except Exception as e:
                 logger.error(f"[try_create_cc] Failed to create task: {e}")
         elif command == "check_network":
@@ -1149,6 +1121,16 @@ class AppController:
                 asyncio.create_task(self.apphandler.send_image_to_app())
             except Exception as e:
                 logger.error(f"[VERIFY_IMAGE] Failed to create task: {e}")
+        elif command == "set_cc_enabled":
+            logger.info(f"received command: {message}")
+            payload = message.get("payload")
+            is_cc_enabled = payload.get("cc_enabled")
+            self.apphandler.set_cc_enabled(is_cc_enabled)
+            self.create_and_send_message("set_cc_enabled", {"message": "cc enabled command received"}, timeout=0.5)
+        elif command == "get_cc_enabled":
+            logger.info(f"received command: {message}")
+            get_cc_enabled_result = self.apphandler.get_cc_enabled()
+            self.create_and_send_message("get_cc_enabled", {"message": "cc enabled command received", "cc_enabled": get_cc_enabled_result}, timeout=0.5)
         elif command == "reboot":
             logger.info(f"received command: {message}")
             import machine

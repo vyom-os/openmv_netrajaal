@@ -23,6 +23,7 @@ from config import (
     uid,
     get_my_addr,
     led_restart_blinker,
+    get_machine_port,
     VERSION
 )
 from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes
@@ -3140,14 +3141,20 @@ class AppHandler:
             turn_OFF_IR_emitter()
             power_mgmt.camera_sleep()
 
-    async def try_create_cc(self):
+    def get_internet_module_status(self):  # FUNCTION 1
+        """ has_internet: boolean
+            error: string, error message if not internet, else None"""
+        return internet_module.get_module_status()
+            
+    async def try_internet_establish(self):   # FUNCTION 2, TODO rename it to try_internet_establish
         try:
             global internet_module, network_paths, tracx_uart_lock
             async with tracx_uart_lock:
                 internet_module.reset_module()
                 await internet_module.establish_internet(retry_count=2)
             if internet_module and internet_module.internet_established():
-                network_paths = []
+                if internet_module.cc_enabled():
+                    network_paths = []
                 app_controller.create_and_send_message("verify_internet", {"message": "Internet Established!", "result": "pass"}, timeout=0.5)
                 return True
             else:
@@ -3157,6 +3164,12 @@ class AppHandler:
             app_controller.create_and_send_message("verify_internet", {"message": f"Error while Establishing Internet!", "result": "fail"}, timeout=0.5)
             logger.error(f"[try_create_cc] error in try_create_cc: {e}")
             return False
+    
+    def get_cc_enabled(self):   # FUNCTION 3
+        return internet_module.get_cc_enabled()
+
+    def set_cc_enabled(self, is_cc_enabled):   # FUNCTION 4
+        internet_module.set_cc_enabled(is_cc_enabled)
 
     async def verify_internet_capture_and_upload(self):
         try:
@@ -3260,7 +3273,8 @@ async def enter_install_mode():
     logger.info("[INSTALL] 𓆦𓆦𓆦𓆦𓆦𓆦❯❯ Entering install mode... ❮❮𓆦𓆦𓆦𓆦𓆦𓆦")
     is_install_mode = True
     asyncio.create_task(rest_mode_broadcating())
-    await app_controller.start()
+    machine_port = get_machine_port()
+    await app_controller.start(machine_port)
 
     logger.info(f"[INSTALL] Waiting up to {INSTALL_MODE_WAIT_TIME}s for app connection...")
     await asyncio.sleep(INSTALL_MODE_WAIT_TIME)
