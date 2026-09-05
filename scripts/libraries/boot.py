@@ -1817,14 +1817,14 @@ async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
     global internet_module, tracx_uart_lock
 
     if running_as_unit():
-        logger.warning(f"upload called from unit node, skipping uploads")
+        logger.error(f"upload called from unit node, skipping uploads")
         return False
     if internet_module.is_busy:
-        logger.warning("Internet module is busy, skipping upload...")
+        logger.error("Internet module is busy, skipping upload...")
         return False
     if not internet_module:
         app_controller.create_and_send_message("verify_internet", {"message": "Internet module not initialized"}, timeout=0.5)
-        logger.warning(f"Internet module not initialized")
+        logger.error(f"Internet module not initialized, skipping uploads")
         return False
 
     try:
@@ -1982,9 +1982,12 @@ async def hb_process(msg_uid, msgbytes, sender):
                 logger.error(f"[HB] Failed to decrypt HB message: {e}")
         else:
             try:
-                logger.debug(f"[HB] HB send msg = {msgbytes.decode()}")
+                logger.info(f"[HB] HB uploading, decoded msg = {msgbytes.decode()}, type={type(msgbytes)}")
             except Exception as e:
-                logger.error(f"[HB] Failed to decode HB message: {e}")
+                try:
+                    logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}, type={type(msgbytes)}")
+                except Exception as e:
+                    logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}")
 
         return
     else:
@@ -2709,45 +2712,51 @@ async def keep_generating_heartbeat():
     print_pause = True
     print_resume = False
     while True:
-        await asyncio.sleep(3)
-        global trans_in_progress
-        if trans_in_progress:
-            if print_pause:
-                logger.info("[HB] PAUSED")
-            print_pause = False
-            print_resume = True
-            await asyncio.sleep(200)
-            continue
-        else:
-            if print_resume:
-                logger.info("[HB] RESUMED")
-            print_resume = False
-            print_pause = True
+        try:
+            await asyncio.sleep(3)
+            global trans_in_progress
+            if trans_in_progress:
+                if print_pause:
+                    logger.info("[HB] PAUSED")
+                print_pause = False
+                print_resume = True
+                await asyncio.sleep(200)
+                continue
+            else:
+                if print_resume:
+                    logger.info("[HB] RESUMED")
+                print_resume = False
+                print_pause = True
 
-        if running_as_unit() and len(network_paths)==0:
-            logger.debug("Not sending heartbeat, because I am a unit with no network paths")
-            await asyncio.sleep(5)
-            continue
+            if running_as_unit() and len(network_paths)==0:
+                logger.debug("Not sending heartbeat, because I am a unit with no network paths")
+                await asyncio.sleep(5)
+                continue
 
-        if running_as_cc() and internet_module.is_busy:
-            logger.debug("Not sending heartbeat, because I am a CC and internet module is busy")
-            await asyncio.sleep(5)
-            continue
+            if running_as_cc() and internet_module.is_busy:
+                logger.debug("Not sending heartbeat, because I am a CC and internet module is busy")
+                await asyncio.sleep(5)
+                continue
 
-        sent_succ = await asyncio.create_task(send_heartbeat())
-        if not sent_succ:
+            sent_succ = await asyncio.create_task(send_heartbeat())
+            if not sent_succ:
+                consecutive_hb_failures += 1
+                logger.warning(f"consecutive heartbeat failures = {consecutive_hb_failures}")
+                if consecutive_hb_failures >= 25: # TODO NEED to discuss more
+                    logger.error("Too many consecutive heartbeat failures, Rebooting device")
+                    try:
+                        await reboot_device()
+                    except Exception as e:
+                        logger.error(f"reinitializing LoRa: {e}")
+            else:
+                consecutive_hb_failures = 0
+                logger.info("[HB] ✔✔✔ HB SUCCESS")
+            await asyncio.sleep(HB_WAIT + random.randint(3,10))
+        except Exception as e:
+            logger.error(f"error in keep_generating_heartbeat: {str(e)}")
             consecutive_hb_failures += 1
-            logger.warning(f"consecutive heartbeat failures = {consecutive_hb_failures}")
-            if consecutive_hb_failures >= 25: # TODO NEED to discuss more
-                logger.error("Too many consecutive heartbeat failures, Rebooting device")
-                try:
-                    await reboot_device()
-                except Exception as e:
-                    logger.error(f"reinitializing LoRa: {e}")
-        else:
-            consecutive_hb_failures = 0
-            logger.info("[HB] ✔✔✔ HB SUCCESS")
-        await asyncio.sleep(HB_WAIT + random.randint(3,10))
+            sys.print_exception(e)
+            await asyncio.sleep(HB_WAIT + random.randint(3,10))
 
 async def send_debugmsg():
     # Input: None; Output: bool indicating whether debug payload was sent as broadcast
