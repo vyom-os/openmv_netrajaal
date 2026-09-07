@@ -24,7 +24,8 @@ from config import (
     get_my_addr,
     led_restart_blinker,
     get_machine_port,
-    VERSION
+    VERSION,
+    get_version_str
 )
 from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes
 from sx1262 import SX1262
@@ -263,6 +264,7 @@ async def init_device():
         logger.error(f"error in main.py: Unknown device UID for {uid}, rebooting...")
         return False
     print(f"MY_ADDR: {my_addr}")
+    print(f"FIRM_VER: {get_version_str(VERSION)}")
 
     encnode = enc.EncNode(my_addr)
 
