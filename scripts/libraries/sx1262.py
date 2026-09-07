@@ -24,6 +24,8 @@ class SX1262(SX126X):
         self.rxen = Pin(rxen, mode=Pin.OUT) if rxen is not None else None
         self._rfSwitch('idle')
         self._callbackFunction = self._dummyFunction
+        self._last_rssi = None
+        self._last_snr = None
 
     def _rfSwitch(self, mode):
         if self.txen is None and self.rxen is None:
@@ -288,6 +290,14 @@ class SX1262(SX126X):
         except AssertionError as e:
             state = list(ERROR.keys())[list(ERROR.values()).index(str(e))]
 
+        # PacketStatus is overwritten by the next RX; grab it before startReceive.
+        try:
+            self._last_rssi = super().getRSSI()
+            self._last_snr = super().getSNR()
+        except Exception:
+            self._last_rssi = None
+            self._last_snr = None
+
         ASSERT(super().startReceive())
 
         if state == ERR_NONE or state == ERR_CRC_MISMATCH:
@@ -295,6 +305,14 @@ class SX1262(SX126X):
 
         else:
             return b'', state
+
+    def getLastRSSI(self):
+        """RSSI of the packet last read by recv(), captured before RX restart."""
+        return self._last_rssi
+
+    def getLastSNR(self):
+        """SNR of the packet last read by recv(), captured before RX restart."""
+        return self._last_snr
 
     def _startTransmit(self, data):
         if isinstance(data, bytes) or isinstance(data, bytearray):

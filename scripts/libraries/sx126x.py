@@ -343,6 +343,13 @@ class SX126X:
         self.irq.irq(trigger=Pin.IRQ_RISING, handler=func)
 
     def clearDio1Action(self):
+        try:
+            self.irq.irq(handler=None)
+        except Exception:
+            try:
+                self.irq.irq(trigger=0, handler=None)
+            except Exception:
+                pass
         self.irq = Pin(self._irq, mode=Pin.IN)
 
     def startTransmit(self, data, len_, addr=0):
