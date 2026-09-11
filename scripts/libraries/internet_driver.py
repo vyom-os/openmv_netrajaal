@@ -1,6 +1,7 @@
 import time
 import utime
 from config import (
+    uid,
     get_my_addr,
     led_restart_blinker,
     ENCRYPTION_ENABLED,
@@ -64,6 +65,8 @@ SUCCESS_INTERNET_RETRY_INTERVAL_SEC = 240 * 60  # 4 hours
 GSM_RST_PIN = "P11"      # OpenMV pin wired to EC200 RESET_N (active-low)
 GSM_RST_HOLD_MS = 400    # Quectel min ~150–300 ms; 400 ms is a safe pulse
 
+# SIM_APN = "airtelgprs.com"
+SIM_APN = "iot.com"
 
 def hardware_reset_gsm(hold_ms=None):
     """Pulse EC200 RESET_N on OpenMV P11 (active-low). No InternetDriver needed.
@@ -84,7 +87,6 @@ def hardware_reset_gsm(hold_ms=None):
     
     time.sleep_ms(hold_ms)
     rst.value(1)
-    print(f"[CELL] Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
     return True
 
 # AT response substrings for registration checks (CEREG=LTE, CGREG=3G PS)
@@ -218,14 +220,22 @@ class InternetDriver(InternetUtils):
         """
         try:
             self.machine_id = get_my_addr()
-            print(f"MY_ADDR: {self.machine_id}")
             self.configure_sensor = configure_sensor
             self.process_id = process_id
+            print("[CELL] InternetDriver initializing...")
             if self.configure_sensor:
                 sensor.reset()
                 sensor.set_pixformat(sensor.RGB565)
                 sensor.set_framesize(sensor.SVGA)
                 sensor.skip_frames(time=2000)
+            
+            # first reset hardware to clear any stale state
+            ok = hardware_reset_gsm()
+            if ok:
+                print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete.")
+            else:
+                print("[CELL] ✘✘✘ Failed to reset hardware")
+            
             # If caller passed a MicroPython UART (like main.py does), adapt it.
             if uart is not None:
                 if hasattr(uart, "any") and not hasattr(uart, "in_waiting"):
@@ -280,7 +290,6 @@ class InternetDriver(InternetUtils):
             self.network_type = NW_TYPE_UNKNOWN
             self.network_status = NW_STATUS_UNKNOWN
 
-            logger.info("InternetDriver initializing...")
         except Exception as e:
             print(f"Error in InternetDriver init: {e}")
             self.module_ready = False
@@ -350,7 +359,7 @@ class InternetDriver(InternetUtils):
     async def _write_and_drain(self, data, drain_sleep=0.15):
         """
         Write raw bytes to UART and wait for TX to clock out.
-        The EC200U-CN at 115200 baud
+        The EC200U-CN at BAUDRATE baud
         clocks 512 bytes in ~45 ms; 150 ms gives 3× headroom without wasting time.
         If the caller knows its payload size it can pass a tighter value.
         """
@@ -424,17 +433,33 @@ class InternetDriver(InternetUtils):
     async def _activate_pdp_data_context(self, context_id=1):
         """
         Ensure PDP context is active. Deactivate first to clear any stale/partial
-        state, then re-activate cleanly. Deactivation errors are ignored - the
-        context may already be inactive.
+        state, then set APN (QICSGP is only allowed while deactivated), then
+        re-activate cleanly. Deactivation errors are ignored - the context may
+        already be inactive.
         """
         # Give the module time to fully reset or QIACT may appear OK but drop
         # immediately and cause AT+QHTTPURL 711 errors.
         await asyncio.sleep(3)
+
+        # QICSGP returns ERROR if the context is still active (common after
+        # reset/attach). Deactivate first, then configure APN.
         success, resp = await self._send_command(f"AT+QIDEACT={context_id}", timeout=10)
         if not success:
             print(f"[CELL] QIDEACT ignored: {resp}")
         await asyncio.sleep(1)
 
+        # context_type=1 IPv4; authentication=0 NONE (Airtel has no PAP user/pass)
+        success, resp = await self._send_command(
+            f'AT+QICSGP={context_id},1,"{SIM_APN}","","",0', timeout=5
+        )
+        if not success:
+            print(f"[CELL] ✘✘✘ Failed to set APN: {resp}")
+            _, err_resp = await self._send_command("AT+QIGETERROR", timeout=5)
+            print(f"[CELL] ✘✘✘ QIGETERROR after QICSGP: {err_resp}")
+            return False
+        print(f"[CELL] APN set successfully to {SIM_APN}")
+
+        # PDP context set: 
         success, resp = await self._send_command(f"AT+QIACT={context_id}", timeout=30)
         if not success:
             print(f"[CELL] ✘✘✘ Failed to activate PDP context: {resp}")
@@ -442,13 +467,15 @@ class InternetDriver(InternetUtils):
             print(f"[CELL] ✘✘✘ QIGETERROR error: {err_resp}")
             return False
 
-        # PDP context check: 1 => activated data path (has an IP)
+        # AT+QIACT?: +QIACT: <id>,<state>   // state 1=activated (has IP), 0 or missing = deactivated
         success, resp = await self._send_command("AT+QIACT?", timeout=5)
         if not success or f"+QIACT: {context_id},1" not in resp:
             print(f"[CELL] ✘✘✘ PDP context did not come up cleanly: {resp}")
             return False
 
         print("[CELL] ✔✔✔ PDP context activated")
+        # First HTTPS (DNS + TLS) often returns QHTTPPOST 702 if we POST immediately.
+        await asyncio.sleep(2)
         return True
 
     async def _configure_http_context(self, context_id=1):
@@ -498,6 +525,10 @@ class InternetDriver(InternetUtils):
             await internet_module.establish_internet()
         """
         ok = hardware_reset_gsm(hold_ms=hold_ms)
+        if ok:
+            print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
+        else:
+            print("[CELL] ✘✘✘ Failed to reset hardware")
         self.module_ready = False
         self.has_sim = False
         self.configured = False
@@ -516,8 +547,9 @@ class InternetDriver(InternetUtils):
         # Let module settle (e.g. after GPS/cellular handover, pending output)
         await asyncio.sleep(0.5)
 
-        # Wake first — module may still be in QSCLK sleep from a prior failed init
-        await self._send_command("AT+QSCLK=0", timeout=2)
+        # Undo AT+QSCLK=1 from a prior failed init / idle — do this on every
+        # internet retry, not only after a board restart.
+        await self._exit_sleep()
         
         print("[CELL] Draining past UART input...")
         if not await self._drain_past_uart_input():
@@ -530,7 +562,6 @@ class InternetDriver(InternetUtils):
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False
             self.configured = False
-            await self._enter_sleep()
             return False, "Module configuration error: Failed to get AT response"
         print("[CELL] [Step 1/4] ✔✔✔ AT command response received")
 
@@ -538,7 +569,6 @@ class InternetDriver(InternetUtils):
         if not await self._check_sim():
             self.has_sim = False
             self.configured = False
-            await self._enter_sleep()
             return False, "Module configuration error: SIM not ready"
         print("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
 
@@ -593,6 +623,7 @@ class InternetDriver(InternetUtils):
         if not init_ok:
             self.has_internet = False
             print(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
+            await self._enter_sleep()
         else:
             upload_ok = await self.make_upload_test()
             self.has_internet = upload_ok
@@ -610,6 +641,24 @@ class InternetDriver(InternetUtils):
             print("[CELL] EC200 sleep enabled")
         except Exception:
             pass
+
+    async def _exit_sleep(self):
+        """Wake from AT+QSCLK=1. First UART bytes only wake the UART; then disable sleep.
+
+        Call this at the start of every `_configure_module` (next internet retry).
+        A board restart also wakes via hardware reset, but that is the slow path.
+        """
+        try:
+            # Dummy AT: while asleep the first command is often lost; that is OK.
+            await self._send_command("AT", timeout=1)
+            await asyncio.sleep(0.2)
+            success, resp = await self._send_command("AT+QSCLK=0", timeout=2)
+            if success:
+                print("[CELL] EC200 sleep disabled (QSCLK=0)")
+            else:
+                print(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
+        except Exception as e:
+            print(f"[CELL] error waking from sleep: {e}")
         
     async def _check_network_healthy(self):
         """
@@ -893,6 +942,10 @@ class InternetDriver(InternetUtils):
                     self.is_busy = False
                     return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
             else:
+                print("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
+                await self._http_stop()
+                if url_attempt == 0:
+                    continue
                 self.on_upload_fail()
                 self.is_busy = False
                 return False, 0, f"Failed to set URL length: {resp}"
@@ -910,21 +963,28 @@ class InternetDriver(InternetUtils):
         # --- Step 2: Initiate POST ---
         # No extra settling gap needed — the module is already in HTTP-input mode
         # after the URL OK; adding 300 ms here was pure dead time.
+        # First HTTPS CONNECT can exceed 15s (TLS setup). If we time out while
+        # the modem already entered data mode, later AT commands are swallowed
+        # as the POST body until the session dies — then we reboot.
+        post_connect_timeout = max(int(input_timeout), 30)
         success, resp = await self._send_command(
             f"AT+QHTTPPOST={data_length},{input_timeout},{response_timeout}",
             wait_for="CONNECT",
-            timeout=15,
+            timeout=post_connect_timeout,
         )
         if not success:
+            print("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
+            await self._http_stop()
             self.on_upload_fail()
             self.is_busy = False
             return False, 0, f"Failed to initiate POST: {resp}"
 
         # --- Step 3: Send body ---
         # Compute a tighter drain based on actual byte count + safety margin.
-        # At 115200 baud ≈ 11520 bytes/s → 1 ms per 11.5 bytes.
-        # Add 50 ms fixed overhead for module buffering.
-        baud_ms = max(50, (data_length * 1000) // 11520 + 50)
+        # UART 8N1 = 10 bits/byte, so bytes/s ≈ BAUDRATE / 10.
+        baudrate_bytes = BAUDRATE // 10  # bytes/s,.. as 1 byte costs 10bits => (8 data + start + stop)
+        bytes_per_ms = max(1, baudrate_bytes // 1000)  # bytes/ms
+        baud_ms = max(50, data_length // bytes_per_ms + 50)  # add 50 ms fixed overhead for module buffering.
         drain_s = baud_ms / 1000.0
         await self._write_and_drain(data.encode(), drain_sleep=drain_s)
 
@@ -982,6 +1042,7 @@ class InternetDriver(InternetUtils):
                             self.on_upload_fail()
                             if err == 702:
                                 err = f"{err}, Socket Error or HTTP Request Failure"
+                                await self._http_stop()
                             if http_code:
                                 self.is_busy = False
                                 return (
@@ -1167,7 +1228,13 @@ if __name__ == "__main__":
         
 
     try:
+        print("UID: ", f"{uid}")
         my_addr = get_my_addr()
+        if my_addr is None:
+            print(f"error in internet_driver.py: Unknown device UID for {uid}, rebooting in 10 sec...")
+            time.sleep(10)
+            machine.reset()
+        print(f"MY_ADDR: {my_addr}")
         try:
             tracx_uart = UART(UART_ID, BAUDRATE, timeout=2000)
             internet_module = InternetDriver(uart=tracx_uart, configure_sensor=True)
@@ -1176,13 +1243,13 @@ if __name__ == "__main__":
             # Keep this handler simple; only treat UARTNotAvailableError specially.
             print(f"Internet driver init failed: {e}, Rebooting...")
             write_log(f"Internet driver init failed: {e}, Rebooting...")
-            time.sleep(2)
+            time.sleep(10)
             machine.reset()
 
         if not internet_module.configured:
             print("Internet configuration failed! Rebooting...")
             write_log("Internet configuration failed!, Rebooting...")
-            time.sleep(2)
+            time.sleep(10)
             machine.reset()
 
         # Make POST request
@@ -1250,5 +1317,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Unexpected error: {e}, Rebooting...")
         write_log(f"Unexpected error: {e}, Rebooting...")
-        time.sleep(2)
+        time.sleep(10)
         machine.reset()
