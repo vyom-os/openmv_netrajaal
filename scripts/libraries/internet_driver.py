@@ -15,6 +15,7 @@ import uasyncio as asyncio
 from message_codec import build_heartbeat_payload
 from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
+import json
 
 try:
     import logger
@@ -503,7 +504,7 @@ class InternetDriver(InternetUtils):
         self.has_internet = False
         return ok
 
-    async def _configure_module(self):
+    async def _configure_module(self, stop_http=False):
         """One-time module configuration.
 
         Returns:
@@ -546,6 +547,11 @@ class InternetDriver(InternetUtils):
             self.configured = False
             return False, "Module configuration error: Failed to activate PDP context"
         print("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
+        
+        if stop_http:
+            print("[CELL] Stopping previous HTTP context...")
+            await self._http_stop()
+            print("[CELL] [Step 3.2/4] ✔✔✔ Previous HTTP context stopped")
 
         print("[CELL] Configuring HTTP context...")
         if not await self._configure_http_context():
@@ -817,17 +823,14 @@ class InternetDriver(InternetUtils):
     async def upload_data(
         self, data, url, headers=None, input_timeout=20, response_timeout=20
     ):
-        """
-        Make a POST request with minimised per-request overhead.
+        """POST JSON (or string) to `url` over cellular HTTP (Quectel QHTTP*).
 
-        Key optimisations vs. original:
-        - Health check runs every _health_check_interval uploads (not every time).
-        - Signal strength is logged every _health_check_interval uploads (not every time).
-        - HTTP context is configured once and cached (_http_context_configured flag).
-        - drain_sleep reduced (150 ms vs 500 ms).
-        - Poll sleep reduced (20 ms vs 100 ms).
-        - Settling gap after URL removed (was 300 ms dead sleep).
-        - URL OK-wait loop uses the same fast _read_response helper.
+        Returns:
+            tuple: (success, http_code, response)
+                success (bool): True if the server returned HTTP 200.
+                http_code (int): HTTP status from +QHTTPPOST, or 0 if the
+                    request never got that far (timeout, AT error, health fail).
+                response (str): QHTTPREAD body on success; error message on failure.
         """
         # --- Periodic health check (not every single upload) ---
         self.is_busy = True
@@ -861,16 +864,14 @@ class InternetDriver(InternetUtils):
 
         # --- HTTP context: configure once, skip on subsequent calls ---
         if self._last_fail_count >= 2:
-            await self._http_stop()
-            if not await self._configure_http_context():
+            init_success, init_error = await self._configure_module(stop_http=True)
+            if not init_success:
                 self.on_upload_fail()
                 self.is_busy = False
-                return False, 0, "Failed to configure HTTP context"
+                return False, 0, f"Configuration failed: {init_error}" 
 
         # --- Convert payload ---
         if isinstance(data, dict):
-            import json
-
             data = json.dumps(data)
         data_length = len(data)
 
