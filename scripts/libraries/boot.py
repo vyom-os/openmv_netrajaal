@@ -2877,7 +2877,7 @@ async def network_request_loop():
             # 65535 is for Broadcast
             await send_msg("X", my_addr, scanmsg, 65535)
 
-            if len(network_paths) == 0:
+            if len(network_paths) == 0 and running_as_unit():
                 logger.info(f"[NET] - sleeping for {NETWORK_EMPTY_SLEEP} seconds, for next network `discovery`")
                 await asyncio.sleep(NETWORK_EMPTY_SLEEP)
             else:
