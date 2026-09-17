@@ -1,6 +1,7 @@
 import time
 import utime
 from config import (
+    uid,
     get_my_addr,
     led_restart_blinker,
     ENCRYPTION_ENABLED,
@@ -15,6 +16,7 @@ import uasyncio as asyncio
 from message_codec import build_heartbeat_payload
 from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
+import json
 
 try:
     import logger
@@ -52,18 +54,22 @@ except ImportError:
 # Configuration
 UART_ID = 1
 BAUDRATE = 115200
-MODULE_HEALTH_INTERVAL_SEC = 10 * 60  # 10 minutes
-SIM_RECHECK_INTERVAL_SEC = 120 * 60  # 120 minutes
-RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
-INTERNET_RETRY_INTERVAL_SEC = 60 * 60  # 60 minutes
+UART_HEALTH_INTERVAL_SEC = 10 * 60  # 10 minutes
+SIM_UNDETECTED_INTERVAL_SEC = 120 * 60  # 2 hours
+FAILED_RE_CONFIGURE_INTERVAL_SEC = 30 * 60  # 30 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_CC = 60 * 60  # 60 minutes
+FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT = 240 * 60  # 60 minutes
+SUCCESS_INTERNET_RETRY_INTERVAL_SEC = 240 * 60  # 4 hours
 
 
-GSM_RST_PIN = "P9"       # OpenMV pin wired to EC200 RESET_N (active-low)
+GSM_RST_PIN = "P11"      # OpenMV pin wired to EC200 RESET_N (active-low)
 GSM_RST_HOLD_MS = 400    # Quectel min ~150–300 ms; 400 ms is a safe pulse
 
+# SIM_APN = "airtelgprs.com"
+SIM_APN = "iot.com"
 
 def hardware_reset_gsm(hold_ms=None):
-    """Pulse EC200 RESET_N on OpenMV P9 (active-low). No InternetDriver needed.
+    """Pulse EC200 RESET_N on OpenMV P11 (active-low). No InternetDriver needed.
 
     Idle = HIGH (released). Pulse LOW for hold_ms, then release HIGH.
     AT/PDP/HTTP state is wiped — call establish_internet() afterwards.
@@ -81,7 +87,6 @@ def hardware_reset_gsm(hold_ms=None):
     
     time.sleep_ms(hold_ms)
     rst.value(1)
-    print(f"[CELL] Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
     return True
 
 # AT response substrings for registration checks (CEREG=LTE, CGREG=3G PS)
@@ -215,14 +220,22 @@ class InternetDriver(InternetUtils):
         """
         try:
             self.machine_id = get_my_addr()
-            print(f"MY_ADDR: {self.machine_id}")
             self.configure_sensor = configure_sensor
             self.process_id = process_id
+            print("[CELL] InternetDriver initializing...")
             if self.configure_sensor:
                 sensor.reset()
                 sensor.set_pixformat(sensor.RGB565)
                 sensor.set_framesize(sensor.SVGA)
                 sensor.skip_frames(time=2000)
+            
+            # first reset hardware to clear any stale state
+            ok = hardware_reset_gsm()
+            if ok:
+                print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete.")
+            else:
+                print("[CELL] ✘✘✘ Failed to reset hardware")
+            
             # If caller passed a MicroPython UART (like main.py does), adapt it.
             if uart is not None:
                 if hasattr(uart, "any") and not hasattr(uart, "in_waiting"):
@@ -265,21 +278,25 @@ class InternetDriver(InternetUtils):
             self._last_fail_count = 0
             self.is_busy = False
 
+            # state variables
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False  # is sim present and ready for use
             self.configured = False  # module heath is not good, internet might be issue
             self.has_internet = False  # is internet connection established
+            self.is_cc_enabled = True  # if false device will act as unit node
+            
+            # network variables
             self.signal_strength = 0
             self.network_type = NW_TYPE_UNKNOWN
             self.network_status = NW_STATUS_UNKNOWN
 
-            logger.info("InternetDriver initializing...")
         except Exception as e:
             print(f"Error in InternetDriver init: {e}")
             self.module_ready = False
             self.has_sim = False
             self.configured = False
             self.has_internet = False
+            self.is_cc_enabled = True
 
     # ------------------------------------------------------------------
     # Core UART helpers
@@ -342,7 +359,7 @@ class InternetDriver(InternetUtils):
     async def _write_and_drain(self, data, drain_sleep=0.15):
         """
         Write raw bytes to UART and wait for TX to clock out.
-        The EC200U-CN at 115200 baud
+        The EC200U-CN at BAUDRATE baud
         clocks 512 bytes in ~45 ms; 150 ms gives 3× headroom without wasting time.
         If the caller knows its payload size it can pass a tighter value.
         """
@@ -416,17 +433,33 @@ class InternetDriver(InternetUtils):
     async def _activate_pdp_data_context(self, context_id=1):
         """
         Ensure PDP context is active. Deactivate first to clear any stale/partial
-        state, then re-activate cleanly. Deactivation errors are ignored - the
-        context may already be inactive.
+        state, then set APN (QICSGP is only allowed while deactivated), then
+        re-activate cleanly. Deactivation errors are ignored - the context may
+        already be inactive.
         """
         # Give the module time to fully reset or QIACT may appear OK but drop
         # immediately and cause AT+QHTTPURL 711 errors.
         await asyncio.sleep(3)
+
+        # QICSGP returns ERROR if the context is still active (common after
+        # reset/attach). Deactivate first, then configure APN.
         success, resp = await self._send_command(f"AT+QIDEACT={context_id}", timeout=10)
         if not success:
             print(f"[CELL] QIDEACT ignored: {resp}")
         await asyncio.sleep(1)
 
+        # context_type=1 IPv4; authentication=0 NONE (Airtel has no PAP user/pass)
+        success, resp = await self._send_command(
+            f'AT+QICSGP={context_id},1,"{SIM_APN}","","",0', timeout=5
+        )
+        if not success:
+            print(f"[CELL] ✘✘✘ Failed to set APN: {resp}")
+            _, err_resp = await self._send_command("AT+QIGETERROR", timeout=5)
+            print(f"[CELL] ✘✘✘ QIGETERROR after QICSGP: {err_resp}")
+            return False
+        print(f"[CELL] APN set successfully to {SIM_APN}")
+
+        # PDP context set: 
         success, resp = await self._send_command(f"AT+QIACT={context_id}", timeout=30)
         if not success:
             print(f"[CELL] ✘✘✘ Failed to activate PDP context: {resp}")
@@ -434,13 +467,15 @@ class InternetDriver(InternetUtils):
             print(f"[CELL] ✘✘✘ QIGETERROR error: {err_resp}")
             return False
 
-        # PDP context check: 1 => activated data path (has an IP)
+        # AT+QIACT?: +QIACT: <id>,<state>   // state 1=activated (has IP), 0 or missing = deactivated
         success, resp = await self._send_command("AT+QIACT?", timeout=5)
         if not success or f"+QIACT: {context_id},1" not in resp:
             print(f"[CELL] ✘✘✘ PDP context did not come up cleanly: {resp}")
             return False
 
         print("[CELL] ✔✔✔ PDP context activated")
+        # First HTTPS (DNS + TLS) often returns QHTTPPOST 702 if we POST immediately.
+        await asyncio.sleep(2)
         return True
 
     async def _configure_http_context(self, context_id=1):
@@ -480,7 +515,7 @@ class InternetDriver(InternetUtils):
         await asyncio.sleep(0.2)
 
     def reset_module(self, hold_ms=None):
-        """Hardware-reset EC200 via RESET_N on P9 (active-low).
+        """Hardware-reset EC200 via RESET_N on P11 (active-low).
 
         Pulses RESET_N low then releases. Module AT/PDP/HTTP state is lost;
         call establish_internet() (or init_tracx_internet() from main) after.
@@ -490,13 +525,17 @@ class InternetDriver(InternetUtils):
             await internet_module.establish_internet()
         """
         ok = hardware_reset_gsm(hold_ms=hold_ms)
+        if ok:
+            print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
+        else:
+            print("[CELL] ✘✘✘ Failed to reset hardware")
         self.module_ready = False
         self.has_sim = False
         self.configured = False
         self.has_internet = False
         return ok
 
-    async def _configure_module(self):
+    async def _configure_module(self, stop_http=False):
         """One-time module configuration.
 
         Returns:
@@ -508,8 +547,9 @@ class InternetDriver(InternetUtils):
         # Let module settle (e.g. after GPS/cellular handover, pending output)
         await asyncio.sleep(0.5)
 
-        # Wake first — module may still be in QSCLK sleep from a prior failed init
-        await self._send_command("AT+QSCLK=0", timeout=2)
+        # Undo AT+QSCLK=1 from a prior failed init / idle — do this on every
+        # internet retry, not only after a board restart.
+        await self._exit_sleep()
         
         print("[CELL] Draining past UART input...")
         if not await self._drain_past_uart_input():
@@ -522,7 +562,6 @@ class InternetDriver(InternetUtils):
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False
             self.configured = False
-            await self._enter_sleep()
             return False, "Module configuration error: Failed to get AT response"
         print("[CELL] [Step 1/4] ✔✔✔ AT command response received")
 
@@ -530,7 +569,6 @@ class InternetDriver(InternetUtils):
         if not await self._check_sim():
             self.has_sim = False
             self.configured = False
-            await self._enter_sleep()
             return False, "Module configuration error: SIM not ready"
         print("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
 
@@ -539,6 +577,11 @@ class InternetDriver(InternetUtils):
             self.configured = False
             return False, "Module configuration error: Failed to activate PDP context"
         print("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
+        
+        if stop_http:
+            print("[CELL] Stopping previous HTTP context...")
+            await self._http_stop()
+            print("[CELL] [Step 3.2/4] ✔✔✔ Previous HTTP context stopped")
 
         print("[CELL] Configuring HTTP context...")
         if not await self._configure_http_context():
@@ -580,6 +623,7 @@ class InternetDriver(InternetUtils):
         if not init_ok:
             self.has_internet = False
             print(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
+            await self._enter_sleep()
         else:
             upload_ok = await self.make_upload_test()
             self.has_internet = upload_ok
@@ -597,6 +641,24 @@ class InternetDriver(InternetUtils):
             print("[CELL] EC200 sleep enabled")
         except Exception:
             pass
+
+    async def _exit_sleep(self):
+        """Wake from AT+QSCLK=1. First UART bytes only wake the UART; then disable sleep.
+
+        Call this at the start of every `_configure_module` (next internet retry).
+        A board restart also wakes via hardware reset, but that is the slow path.
+        """
+        try:
+            # Dummy AT: while asleep the first command is often lost; that is OK.
+            await self._send_command("AT", timeout=1)
+            await asyncio.sleep(0.2)
+            success, resp = await self._send_command("AT+QSCLK=0", timeout=2)
+            if success:
+                print("[CELL] EC200 sleep disabled (QSCLK=0)")
+            else:
+                print(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
+        except Exception as e:
+            print(f"[CELL] error waking from sleep: {e}")
         
     async def _check_network_healthy(self):
         """
@@ -718,12 +780,42 @@ class InternetDriver(InternetUtils):
     # ============================================================
     # STATE FUNCTIONS (CC/unit role, signal, network status)
     # ============================================================
+    
+    def internet_established(self):
+        return bool(self.has_internet)
 
     def running_as_cc(self):
-        return bool(self.has_internet)
+        return bool(self.has_internet and self.is_cc_enabled)
 
     def running_as_unit(self):
         return not self.running_as_cc()
+
+    def cc_enabled(self):
+        return bool(self.is_cc_enabled)
+    
+    
+    def get_module_status(self):
+        """Return is device has internet, if not what is the error"""
+        if not self.module_ready:
+            return False, "MODULE NOT READY"
+        if not self.has_sim:
+            return False, "SIM NOT READY"
+        if not self.configured:
+            return False, "MODULE NOT CONFIGURED"
+        if not self.has_internet:
+            return False, "INTERNET NOT ESTABLISHED"
+        return True, None
+        
+    def get_cc_enabled(self):
+        return bool(self.is_cc_enabled)
+
+    def set_cc_enabled(self, is_cc_enabled):
+        if is_cc_enabled:
+            self.is_cc_enabled = True
+            logger.info("[CELL] ✔✔✔ CC enabled")
+        else:
+            self.is_cc_enabled = False
+            logger.info("[CELL] ✔✔✔ CC disabled")
 
     def save_signal_strength(self, signal_strength):
         try:
@@ -780,197 +872,211 @@ class InternetDriver(InternetUtils):
     async def upload_data(
         self, data, url, headers=None, input_timeout=20, response_timeout=20
     ):
+        """POST JSON (or string) to `url` over cellular HTTP (Quectel QHTTP*).
+
+        Returns:
+            tuple: (success, http_code, response)
+                success (bool): True if the server returned HTTP 200.
+                http_code (int): HTTP status from +QHTTPPOST, or 0 if the
+                    request never got that far (timeout, AT error, health fail).
+                response (str): QHTTPREAD body on success; error message on failure.
         """
-        Make a POST request with minimised per-request overhead.
-
-        Key optimisations vs. original:
-        - Health check runs every _health_check_interval uploads (not every time).
-        - Signal strength is logged every _health_check_interval uploads (not every time).
-        - HTTP context is configured once and cached (_http_context_configured flag).
-        - drain_sleep reduced (150 ms vs 500 ms).
-        - Poll sleep reduced (20 ms vs 100 ms).
-        - Settling gap after URL removed (was 300 ms dead sleep).
-        - URL OK-wait loop uses the same fast _read_response helper.
-        """
-        # --- Periodic health check (not every single upload) ---
-        self.is_busy = True
-        self._uploads_since_health_check += 1
-        do_health_check = (
-            self._uploads_since_health_check > self._health_check_interval
-        )
-        if do_health_check:
-            self._uploads_since_health_check = 0
-            ok, err = await self._ensure_network_healthy()
-            if not ok:
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, err
-
-            # --- Periodic signal strength update and log ---
-            signal_pct = await self.get_signal_strength()
-            self.save_signal_strength(signal_pct)
-            nw_type = self.get_last_network_type()
-            nw_status = self.get_last_network_status()
-            if signal_pct is not None:
-                logger.info(
-                    "[CELL] Uploading data, signal: %s%%, nw_type: %s, nw_status: %s"
-                    % (signal_pct, nw_type, nw_status)
-                )
-            else:
-                logger.warning(
-                    "[CELL] Uploading data, signal: unknown, nw_type: %s, nw_status: %s"
-                    % (nw_type, nw_status)
-                )
-
-        # --- HTTP context: configure once, skip on subsequent calls ---
-        if self._last_fail_count >= 2:
-            await self._http_stop()
-            if not await self._configure_http_context():
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, "Failed to configure HTTP context"
-
-        # --- Convert payload ---
-        if isinstance(data, dict):
-            import json
-
-            data = json.dumps(data)
-        data_length = len(data)
-
-        # --- Step 1: Set URL ---
-        for url_attempt in range(2):
-            url_length = len(url)
-            success, resp = await self._send_command(
-                f"AT+QHTTPURL={url_length},80", wait_for="CONNECT", timeout=5
+        try:
+            # --- Periodic health check (not every single upload) ---
+            self.is_busy = True
+            self._uploads_since_health_check += 1
+            do_health_check = (
+                self._uploads_since_health_check > self._health_check_interval
             )
-            if success:
-                break
-            if "711" in resp and url_attempt == 0:
-                # PDP context was lost mid-flight - re-activate and retry once.
-                print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
-                await asyncio.sleep(2)
-                init_success, init_error = await self._configure_module()
+            if do_health_check:
+                self._uploads_since_health_check = 0
+                ok, err = await self._ensure_network_healthy()
+                if not ok:
+                    self.on_upload_fail()
+                    self.is_busy = False
+                    return False, 0, err
+
+                # --- Periodic signal strength update and log ---
+                signal_pct = await self.get_signal_strength()
+                self.save_signal_strength(signal_pct)
+                nw_type = self.get_last_network_type()
+                nw_status = self.get_last_network_status()
+                if signal_pct is not None:
+                    logger.info(
+                        "[CELL] Uploading data, signal: %s%%, nw_type: %s, nw_status: %s"
+                        % (signal_pct, nw_type, nw_status)
+                    )
+                else:
+                    logger.warning(
+                        "[CELL] Uploading data, signal: unknown, nw_type: %s, nw_status: %s"
+                        % (nw_type, nw_status)
+                    )
+
+            # --- HTTP context: configure once, skip on subsequent calls ---
+            if self._last_fail_count >= 2:
+                init_success, init_error = await self._configure_module(stop_http=True)
                 if not init_success:
                     self.on_upload_fail()
                     self.is_busy = False
-                    return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
-            else:
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, f"Failed to set URL length: {resp}"
+                    return False, 0, f"Configuration failed: {init_error}" 
 
-        # Send URL — reduced drain_sleep: URL is short (~40 bytes)
-        await self._write_and_drain((url + "\r\n").encode(), drain_sleep=0.1)
+            # --- Convert payload ---
+            if isinstance(data, dict):
+                data = json.dumps(data)
+            data_length = len(data)
 
-        # Wait for OK — reuse fast reader (20 ms poll, 5 s timeout)
-        ok_found, response = await self._read_response("OK", timeout_ms=5000)
-        if not ok_found:
-            self.on_upload_fail()
-            self.is_busy = False
-            return False, 0, f"Failed to set URL: {response}"
-
-        # --- Step 2: Initiate POST ---
-        # No extra settling gap needed — the module is already in HTTP-input mode
-        # after the URL OK; adding 300 ms here was pure dead time.
-        success, resp = await self._send_command(
-            f"AT+QHTTPPOST={data_length},{input_timeout},{response_timeout}",
-            wait_for="CONNECT",
-            timeout=15,
-        )
-        if not success:
-            self.on_upload_fail()
-            self.is_busy = False
-            return False, 0, f"Failed to initiate POST: {resp}"
-
-        # --- Step 3: Send body ---
-        # Compute a tighter drain based on actual byte count + safety margin.
-        # At 115200 baud ≈ 11520 bytes/s → 1 ms per 11.5 bytes.
-        # Add 50 ms fixed overhead for module buffering.
-        baud_ms = max(50, (data_length * 1000) // 11520 + 50)
-        drain_s = baud_ms / 1000.0
-        await self._write_and_drain(data.encode(), drain_sleep=drain_s)
-
-        # --- Step 4: Wait for POST response ---
-        max_wait_ms = min(response_timeout + 10, 40) * 1000
-        start = time.ticks_ms()
-        response = ""
-
-        while time.ticks_diff(time.ticks_ms(), start) < max_wait_ms:
-            available = getattr(self.uart, "in_waiting", 0)
-            if available:
-                chunk = self.uart.read(available)
-                if chunk:
-                    try:
-                        response += chunk.decode("utf-8")
-                    except Exception:
-                        try:
-                            response += chunk.decode("latin-1")
-                        except Exception:
-                            pass
-
-                # Look for +QHTTPPOST: response - only parse once the full line
-                # has arrived (newline present) to avoid IndexError on partial reads.
-                if (
-                    "+QHTTPPOST:" in response
-                    and "\n" in response.split("+QHTTPPOST:")[1]
-                ):
-                    # Queue/EC200 often returns responses:
-                    # - +QHTTPPOST: <err>,<http_code>,<content_length>, e.g: +QHTTPPOST: 0,200,106
-                    # - +QHTTPPOST: <err>   (some errors return only the first field), e.g: +QHTTPPOST: 702
-                    try:
-                        raw_after = response.split("+QHTTPPOST:")[1]
-                        post_line = raw_after.split("\n")[0].strip()
-                        tokens = [t.strip() for t in post_line.split(",")]
-
-                        def _to_int(s, default=0):
-                            try:
-                                return int(s)
-                            except Exception:
-                                return default
-
-                        err = _to_int(tokens[0], default=-1) if len(tokens) >= 1 else -1
-                        http_code = _to_int(tokens[1], default=0) if len(tokens) >= 2 else 0
-
-                        if err == 0 and http_code == 200:
-                            # Step 5: Read response data (shorter read timeout)
-                            read_timeout = min(max(response_timeout, 10), 40)
-                            success, read_resp = await self._send_command(
-                                "AT+QHTTPREAD=80", timeout=read_timeout
-                            )
-                            self.on_upload_success()
-                            self.is_busy = False
-                            return True, http_code, read_resp
-                        else:
-                            self.on_upload_fail()
-                            if err == 702:
-                                err = f"{err}, Socket Error or HTTP Request Failure"
-                            if http_code:
-                                self.is_busy = False
-                                return (
-                                    False,
-                                    http_code,
-                                    f"HTTP Error: {http_code} (QHTTPPOST err={err})",
-                                )
-                            self.is_busy = False
-                            return False, 0, f"POST failed: QHTTPPOST err={err}"
-                    except Exception as e:
+            # --- Step 1: Set URL ---
+            for url_attempt in range(2):
+                url_length = len(url)
+                success, resp = await self._send_command(
+                    f"AT+QHTTPURL={url_length},80", wait_for="CONNECT", timeout=5
+                )
+                if success:
+                    break
+                if "711" in resp and url_attempt == 0:
+                    # PDP context was lost mid-flight - re-activate and retry once.
+                    print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
+                    await asyncio.sleep(2)
+                    init_success, init_error = await self._configure_module()
+                    if not init_success:
+                        self.on_upload_fail()
                         self.is_busy = False
-                        return (
-                            False,
-                            0,
-                            f"Failed to parse response: {str(e)}, Response: {response}",
-                        )
-
-                if "ERROR" in response:
+                        return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
+                else:
+                    print("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
+                    await self._http_stop()
+                    if url_attempt == 0:
+                        continue
                     self.on_upload_fail()
                     self.is_busy = False
-                    return False, 0, f"POST failed: {response}"
+                    return False, 0, f"Failed to set URL length: {resp}"
 
-            await asyncio.sleep(0.02)
+            # Send URL — reduced drain_sleep: URL is short (~40 bytes)
+            await self._write_and_drain((url + "\r\n").encode(), drain_sleep=0.1)
+
+            # Wait for OK — reuse fast reader (20 ms poll, 5 s timeout)
+            ok_found, response = await self._read_response("OK", timeout_ms=5000)
+            if not ok_found:
+                self.on_upload_fail()
+                self.is_busy = False
+                return False, 0, f"Failed to set URL: {response}"
+
+            # --- Step 2: Initiate POST ---
+            # No extra settling gap needed — the module is already in HTTP-input mode
+            # after the URL OK; adding 300 ms here was pure dead time.
+            # First HTTPS CONNECT can exceed 15s (TLS setup). If we time out while
+            # the modem already entered data mode, later AT commands are swallowed
+            # as the POST body until the session dies — then we reboot.
+            post_connect_timeout = max(int(input_timeout), 30)
+            success, resp = await self._send_command(
+                f"AT+QHTTPPOST={data_length},{input_timeout},{response_timeout}",
+                wait_for="CONNECT",
+                timeout=post_connect_timeout,
+            )
+            if not success:
+                print("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
+                await self._http_stop()
+                self.on_upload_fail()
+                self.is_busy = False
+                return False, 0, f"Failed to initiate POST: {resp}"
+
+            # --- Step 3: Send body ---
+            # Compute a tighter drain based on actual byte count + safety margin.
+            # UART 8N1 = 10 bits/byte, so bytes/s ≈ BAUDRATE / 10.
+            baudrate_bytes = BAUDRATE // 10  # bytes/s,.. as 1 byte costs 10bits => (8 data + start + stop)
+            bytes_per_ms = max(1, baudrate_bytes // 1000)  # bytes/ms
+            baud_ms = max(50, data_length // bytes_per_ms + 50)  # add 50 ms fixed overhead for module buffering.
+            drain_s = baud_ms / 1000.0
+            await self._write_and_drain(data.encode(), drain_sleep=drain_s)
+
+            # --- Step 4: Wait for POST response ---
+            max_wait_ms = min(response_timeout + 10, 40) * 1000
+            start = time.ticks_ms()
+            response = ""
+
+            while time.ticks_diff(time.ticks_ms(), start) < max_wait_ms:
+                available = getattr(self.uart, "in_waiting", 0)
+                if available:
+                    chunk = self.uart.read(available)
+                    if chunk:
+                        try:
+                            response += chunk.decode("utf-8")
+                        except Exception:
+                            try:
+                                response += chunk.decode("latin-1")
+                            except Exception:
+                                pass
+
+                    # Look for +QHTTPPOST: response - only parse once the full line
+                    # has arrived (newline present) to avoid IndexError on partial reads.
+                    if (
+                        "+QHTTPPOST:" in response
+                        and "\n" in response.split("+QHTTPPOST:")[1]
+                    ):
+                        # Queue/EC200 often returns responses:
+                        # - +QHTTPPOST: <err>,<http_code>,<content_length>, e.g: +QHTTPPOST: 0,200,106
+                        # - +QHTTPPOST: <err>   (some errors return only the first field), e.g: +QHTTPPOST: 702
+                        try:
+                            raw_after = response.split("+QHTTPPOST:")[1]
+                            post_line = raw_after.split("\n")[0].strip()
+                            tokens = [t.strip() for t in post_line.split(",")]
+
+                            def _to_int(s, default=0):
+                                try:
+                                    return int(s)
+                                except Exception:
+                                    return default
+
+                            err = _to_int(tokens[0], default=-1) if len(tokens) >= 1 else -1
+                            http_code = _to_int(tokens[1], default=0) if len(tokens) >= 2 else 0
+
+                            if err == 0 and http_code == 200:
+                                # Step 5: Read response data (shorter read timeout)
+                                read_timeout = min(max(response_timeout, 10), 40)
+                                success, read_resp = await self._send_command(
+                                    "AT+QHTTPREAD=80", timeout=read_timeout
+                                )
+                                self.on_upload_success()
+                                self.is_busy = False
+                                return True, http_code, read_resp
+                            else:
+                                self.on_upload_fail()
+                                if err == 702:
+                                    err = f"{err}, Socket Error or HTTP Request Failure"
+                                    await self._http_stop()
+                                if http_code:
+                                    self.is_busy = False
+                                    return (
+                                        False,
+                                        http_code,
+                                        f"HTTP Error: {http_code} (QHTTPPOST err={err})",
+                                    )
+                                self.is_busy = False
+                                return False, 0, f"POST failed: QHTTPPOST err={err}"
+                        except Exception as e:
+                            self.is_busy = False
+                            return (
+                                False,
+                                0,
+                                f"Failed to parse response: {str(e)}, Response: {response}",
+                            )
+
+                    if "ERROR" in response:
+                        self.on_upload_fail()
+                        self.is_busy = False
+                        return False, 0, f"POST failed: {response}"
+
+                await asyncio.sleep(0.02)
             
-        self.on_upload_fail()
-        self.is_busy = False
-        return False, 0, "POST timeout"
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "POST timeout"
+
+        except Exception as e:
+            logger.error("[CELL] Upload exception: %s" % e)
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "Upload exception: %s" % e
 
     def on_upload_fail(self):
         self._upload_fail_count += 1
@@ -1129,7 +1235,13 @@ if __name__ == "__main__":
         
 
     try:
+        print("UID: ", f"{uid}")
         my_addr = get_my_addr()
+        if my_addr is None:
+            print(f"error in internet_driver.py: Unknown device UID for {uid}, rebooting in 10 sec...")
+            time.sleep(10)
+            machine.reset()
+        print(f"MY_ADDR: {my_addr}")
         try:
             tracx_uart = UART(UART_ID, BAUDRATE, timeout=2000)
             internet_module = InternetDriver(uart=tracx_uart, configure_sensor=True)
@@ -1138,13 +1250,13 @@ if __name__ == "__main__":
             # Keep this handler simple; only treat UARTNotAvailableError specially.
             print(f"Internet driver init failed: {e}, Rebooting...")
             write_log(f"Internet driver init failed: {e}, Rebooting...")
-            time.sleep(2)
+            time.sleep(10)
             machine.reset()
 
         if not internet_module.configured:
             print("Internet configuration failed! Rebooting...")
             write_log("Internet configuration failed!, Rebooting...")
-            time.sleep(2)
+            time.sleep(10)
             machine.reset()
 
         # Make POST request
@@ -1212,5 +1324,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Unexpected error: {e}, Rebooting...")
         write_log(f"Unexpected error: {e}, Rebooting...")
-        time.sleep(2)
+        time.sleep(10)
         machine.reset()

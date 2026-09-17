@@ -1,3 +1,4 @@
+from machine import Pin
 from _sx126x import *
 from sx126x import SX126X
 
@@ -16,9 +17,58 @@ class SX1262(SX126X):
     PREAMBLE_DETECT_32 = SX126X_GFSK_PREAMBLE_DETECT_32
     STATUS = ERROR
 
-    def __init__(self, spi_bus, clk, mosi, miso, cs, irq, rst, gpio, spi_baudrate=2000000, spi_polarity=0, spi_phase=0):
+    def __init__(self, spi_bus, clk, mosi, miso, cs, irq, rst, gpio, txen, rxen,
+                 spi_baudrate=2000000, spi_polarity=0, spi_phase=0):
         super().__init__(spi_bus, clk, mosi, miso, cs, irq, rst, gpio, spi_baudrate, spi_polarity, spi_phase)
+        self.txen = Pin(txen, mode=Pin.OUT) if txen is not None else None
+        self.rxen = Pin(rxen, mode=Pin.OUT) if rxen is not None else None
+        self._rfSwitch('idle')
         self._callbackFunction = self._dummyFunction
+        self._last_rssi = None
+        self._last_snr = None
+
+    def _rfSwitch(self, mode):
+        if self.txen is None and self.rxen is None:
+            return
+        if mode == 'tx':
+            if self.rxen is not None:
+                self.rxen.value(0)
+            if self.txen is not None:
+                self.txen.value(1)
+        elif mode == 'rx':
+            if self.txen is not None:
+                self.txen.value(0)
+            if self.rxen is not None:
+                self.rxen.value(1)
+        else:
+            if self.txen is not None:
+                self.txen.value(0)
+            if self.rxen is not None:
+                self.rxen.value(0)
+
+    def setTx(self, timeout=0):
+        self._rfSwitch('tx')
+        return super().setTx(timeout)
+
+    def setRx(self, timeout):
+        self._rfSwitch('rx')
+        return super().setRx(timeout)
+
+    def setCad(self):
+        self._rfSwitch('rx')
+        return super().setCad()
+
+    def standby(self, mode=SX126X_STANDBY_RC):
+        self._rfSwitch('idle')
+        return super().standby(mode)
+
+    def sleep(self, retainConfig=True):
+        self._rfSwitch('idle')
+        return super().sleep(retainConfig)
+
+    def transmitDirect(self, frf=0):
+        self._rfSwitch('tx')
+        return super().transmitDirect(frf)
 
     def begin(self, freq=434.0, bw=125.0, sf=9, cr=7, syncWord=SX126X_SYNC_WORD_PRIVATE,
               power=14, currentLimit=60.0, preambleLength=8, implicit=False, implicitLen=0xFF,
@@ -240,6 +290,14 @@ class SX1262(SX126X):
         except AssertionError as e:
             state = list(ERROR.keys())[list(ERROR.values()).index(str(e))]
 
+        # PacketStatus is overwritten by the next RX; grab it before startReceive.
+        try:
+            self._last_rssi = super().getRSSI()
+            self._last_snr = super().getSNR()
+        except Exception:
+            self._last_rssi = None
+            self._last_snr = None
+
         ASSERT(super().startReceive())
 
         if state == ERR_NONE or state == ERR_CRC_MISMATCH:
@@ -247,6 +305,14 @@ class SX1262(SX126X):
 
         else:
             return b'', state
+
+    def getLastRSSI(self):
+        """RSSI of the packet last read by recv(), captured before RX restart."""
+        return self._last_rssi
+
+    def getLastSNR(self):
+        """SNR of the packet last read by recv(), captured before RX restart."""
+        return self._last_snr
 
     def _startTransmit(self, data):
         if isinstance(data, bytes) or isinstance(data, bytearray):

@@ -2,6 +2,8 @@ from collections import deque
 from config import save_log_entry
 from clock_utils import get_epoch_ms
 
+SAVE_FATAL_LOGS = True
+
 log_q_len = 100
 saved_logs = deque([], log_q_len)
 
@@ -28,8 +30,9 @@ def error(m):
     log_internal(f"[ERROR] : {m}")
 def fatal(m):
     log_internal(f"[FATAL] : {m}")
-    try:
-        epoch_ms = get_epoch_ms()
-        save_log_entry(f'{epoch_ms} [FATAL]: {m}')
-    except Exception as e:
-        pass
+    if SAVE_FATAL_LOGS:
+        try:
+            epoch_ms = get_epoch_ms()
+            save_log_entry(f'{epoch_ms} [FATAL]: {m}')
+        except Exception as e:
+            pass
