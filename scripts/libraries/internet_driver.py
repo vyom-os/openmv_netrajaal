@@ -881,195 +881,202 @@ class InternetDriver(InternetUtils):
                     request never got that far (timeout, AT error, health fail).
                 response (str): QHTTPREAD body on success; error message on failure.
         """
-        # --- Periodic health check (not every single upload) ---
-        self.is_busy = True
-        self._uploads_since_health_check += 1
-        do_health_check = (
-            self._uploads_since_health_check > self._health_check_interval
-        )
-        if do_health_check:
-            self._uploads_since_health_check = 0
-            ok, err = await self._ensure_network_healthy()
-            if not ok:
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, err
-
-            # --- Periodic signal strength update and log ---
-            signal_pct = await self.get_signal_strength()
-            self.save_signal_strength(signal_pct)
-            nw_type = self.get_last_network_type()
-            nw_status = self.get_last_network_status()
-            if signal_pct is not None:
-                logger.info(
-                    "[CELL] Uploading data, signal: %s%%, nw_type: %s, nw_status: %s"
-                    % (signal_pct, nw_type, nw_status)
-                )
-            else:
-                logger.warning(
-                    "[CELL] Uploading data, signal: unknown, nw_type: %s, nw_status: %s"
-                    % (nw_type, nw_status)
-                )
-
-        # --- HTTP context: configure once, skip on subsequent calls ---
-        if self._last_fail_count >= 2:
-            init_success, init_error = await self._configure_module(stop_http=True)
-            if not init_success:
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, f"Configuration failed: {init_error}" 
-
-        # --- Convert payload ---
-        if isinstance(data, dict):
-            data = json.dumps(data)
-        data_length = len(data)
-
-        # --- Step 1: Set URL ---
-        for url_attempt in range(2):
-            url_length = len(url)
-            success, resp = await self._send_command(
-                f"AT+QHTTPURL={url_length},80", wait_for="CONNECT", timeout=5
+        try:
+            # --- Periodic health check (not every single upload) ---
+            self.is_busy = True
+            self._uploads_since_health_check += 1
+            do_health_check = (
+                self._uploads_since_health_check > self._health_check_interval
             )
-            if success:
-                break
-            if "711" in resp and url_attempt == 0:
-                # PDP context was lost mid-flight - re-activate and retry once.
-                print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
-                await asyncio.sleep(2)
-                init_success, init_error = await self._configure_module()
+            if do_health_check:
+                self._uploads_since_health_check = 0
+                ok, err = await self._ensure_network_healthy()
+                if not ok:
+                    self.on_upload_fail()
+                    self.is_busy = False
+                    return False, 0, err
+
+                # --- Periodic signal strength update and log ---
+                signal_pct = await self.get_signal_strength()
+                self.save_signal_strength(signal_pct)
+                nw_type = self.get_last_network_type()
+                nw_status = self.get_last_network_status()
+                if signal_pct is not None:
+                    logger.info(
+                        "[CELL] Uploading data, signal: %s%%, nw_type: %s, nw_status: %s"
+                        % (signal_pct, nw_type, nw_status)
+                    )
+                else:
+                    logger.warning(
+                        "[CELL] Uploading data, signal: unknown, nw_type: %s, nw_status: %s"
+                        % (nw_type, nw_status)
+                    )
+
+            # --- HTTP context: configure once, skip on subsequent calls ---
+            if self._last_fail_count >= 2:
+                init_success, init_error = await self._configure_module(stop_http=True)
                 if not init_success:
                     self.on_upload_fail()
                     self.is_busy = False
-                    return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
-            else:
-                print("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
-                await self._http_stop()
-                if url_attempt == 0:
-                    continue
-                self.on_upload_fail()
-                self.is_busy = False
-                return False, 0, f"Failed to set URL length: {resp}"
+                    return False, 0, f"Configuration failed: {init_error}" 
 
-        # Send URL — reduced drain_sleep: URL is short (~40 bytes)
-        await self._write_and_drain((url + "\r\n").encode(), drain_sleep=0.1)
+            # --- Convert payload ---
+            if isinstance(data, dict):
+                data = json.dumps(data)
+            data_length = len(data)
 
-        # Wait for OK — reuse fast reader (20 ms poll, 5 s timeout)
-        ok_found, response = await self._read_response("OK", timeout_ms=5000)
-        if not ok_found:
-            self.on_upload_fail()
-            self.is_busy = False
-            return False, 0, f"Failed to set URL: {response}"
-
-        # --- Step 2: Initiate POST ---
-        # No extra settling gap needed — the module is already in HTTP-input mode
-        # after the URL OK; adding 300 ms here was pure dead time.
-        # First HTTPS CONNECT can exceed 15s (TLS setup). If we time out while
-        # the modem already entered data mode, later AT commands are swallowed
-        # as the POST body until the session dies — then we reboot.
-        post_connect_timeout = max(int(input_timeout), 30)
-        success, resp = await self._send_command(
-            f"AT+QHTTPPOST={data_length},{input_timeout},{response_timeout}",
-            wait_for="CONNECT",
-            timeout=post_connect_timeout,
-        )
-        if not success:
-            print("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
-            await self._http_stop()
-            self.on_upload_fail()
-            self.is_busy = False
-            return False, 0, f"Failed to initiate POST: {resp}"
-
-        # --- Step 3: Send body ---
-        # Compute a tighter drain based on actual byte count + safety margin.
-        # UART 8N1 = 10 bits/byte, so bytes/s ≈ BAUDRATE / 10.
-        baudrate_bytes = BAUDRATE // 10  # bytes/s,.. as 1 byte costs 10bits => (8 data + start + stop)
-        bytes_per_ms = max(1, baudrate_bytes // 1000)  # bytes/ms
-        baud_ms = max(50, data_length // bytes_per_ms + 50)  # add 50 ms fixed overhead for module buffering.
-        drain_s = baud_ms / 1000.0
-        await self._write_and_drain(data.encode(), drain_sleep=drain_s)
-
-        # --- Step 4: Wait for POST response ---
-        max_wait_ms = min(response_timeout + 10, 40) * 1000
-        start = time.ticks_ms()
-        response = ""
-
-        while time.ticks_diff(time.ticks_ms(), start) < max_wait_ms:
-            available = getattr(self.uart, "in_waiting", 0)
-            if available:
-                chunk = self.uart.read(available)
-                if chunk:
-                    try:
-                        response += chunk.decode("utf-8")
-                    except Exception:
-                        try:
-                            response += chunk.decode("latin-1")
-                        except Exception:
-                            pass
-
-                # Look for +QHTTPPOST: response - only parse once the full line
-                # has arrived (newline present) to avoid IndexError on partial reads.
-                if (
-                    "+QHTTPPOST:" in response
-                    and "\n" in response.split("+QHTTPPOST:")[1]
-                ):
-                    # Queue/EC200 often returns responses:
-                    # - +QHTTPPOST: <err>,<http_code>,<content_length>, e.g: +QHTTPPOST: 0,200,106
-                    # - +QHTTPPOST: <err>   (some errors return only the first field), e.g: +QHTTPPOST: 702
-                    try:
-                        raw_after = response.split("+QHTTPPOST:")[1]
-                        post_line = raw_after.split("\n")[0].strip()
-                        tokens = [t.strip() for t in post_line.split(",")]
-
-                        def _to_int(s, default=0):
-                            try:
-                                return int(s)
-                            except Exception:
-                                return default
-
-                        err = _to_int(tokens[0], default=-1) if len(tokens) >= 1 else -1
-                        http_code = _to_int(tokens[1], default=0) if len(tokens) >= 2 else 0
-
-                        if err == 0 and http_code == 200:
-                            # Step 5: Read response data (shorter read timeout)
-                            read_timeout = min(max(response_timeout, 10), 40)
-                            success, read_resp = await self._send_command(
-                                "AT+QHTTPREAD=80", timeout=read_timeout
-                            )
-                            self.on_upload_success()
-                            self.is_busy = False
-                            return True, http_code, read_resp
-                        else:
-                            self.on_upload_fail()
-                            if err == 702:
-                                err = f"{err}, Socket Error or HTTP Request Failure"
-                                await self._http_stop()
-                            if http_code:
-                                self.is_busy = False
-                                return (
-                                    False,
-                                    http_code,
-                                    f"HTTP Error: {http_code} (QHTTPPOST err={err})",
-                                )
-                            self.is_busy = False
-                            return False, 0, f"POST failed: QHTTPPOST err={err}"
-                    except Exception as e:
+            # --- Step 1: Set URL ---
+            for url_attempt in range(2):
+                url_length = len(url)
+                success, resp = await self._send_command(
+                    f"AT+QHTTPURL={url_length},80", wait_for="CONNECT", timeout=5
+                )
+                if success:
+                    break
+                if "711" in resp and url_attempt == 0:
+                    # PDP context was lost mid-flight - re-activate and retry once.
+                    print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
+                    await asyncio.sleep(2)
+                    init_success, init_error = await self._configure_module()
+                    if not init_success:
+                        self.on_upload_fail()
                         self.is_busy = False
-                        return (
-                            False,
-                            0,
-                            f"Failed to parse response: {str(e)}, Response: {response}",
-                        )
-
-                if "ERROR" in response:
+                        return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
+                else:
+                    print("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
+                    await self._http_stop()
+                    if url_attempt == 0:
+                        continue
                     self.on_upload_fail()
                     self.is_busy = False
-                    return False, 0, f"POST failed: {response}"
+                    return False, 0, f"Failed to set URL length: {resp}"
 
-            await asyncio.sleep(0.02)
+            # Send URL — reduced drain_sleep: URL is short (~40 bytes)
+            await self._write_and_drain((url + "\r\n").encode(), drain_sleep=0.1)
+
+            # Wait for OK — reuse fast reader (20 ms poll, 5 s timeout)
+            ok_found, response = await self._read_response("OK", timeout_ms=5000)
+            if not ok_found:
+                self.on_upload_fail()
+                self.is_busy = False
+                return False, 0, f"Failed to set URL: {response}"
+
+            # --- Step 2: Initiate POST ---
+            # No extra settling gap needed — the module is already in HTTP-input mode
+            # after the URL OK; adding 300 ms here was pure dead time.
+            # First HTTPS CONNECT can exceed 15s (TLS setup). If we time out while
+            # the modem already entered data mode, later AT commands are swallowed
+            # as the POST body until the session dies — then we reboot.
+            post_connect_timeout = max(int(input_timeout), 30)
+            success, resp = await self._send_command(
+                f"AT+QHTTPPOST={data_length},{input_timeout},{response_timeout}",
+                wait_for="CONNECT",
+                timeout=post_connect_timeout,
+            )
+            if not success:
+                print("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
+                await self._http_stop()
+                self.on_upload_fail()
+                self.is_busy = False
+                return False, 0, f"Failed to initiate POST: {resp}"
+
+            # --- Step 3: Send body ---
+            # Compute a tighter drain based on actual byte count + safety margin.
+            # UART 8N1 = 10 bits/byte, so bytes/s ≈ BAUDRATE / 10.
+            baudrate_bytes = BAUDRATE // 10  # bytes/s,.. as 1 byte costs 10bits => (8 data + start + stop)
+            bytes_per_ms = max(1, baudrate_bytes // 1000)  # bytes/ms
+            baud_ms = max(50, data_length // bytes_per_ms + 50)  # add 50 ms fixed overhead for module buffering.
+            drain_s = baud_ms / 1000.0
+            await self._write_and_drain(data.encode(), drain_sleep=drain_s)
+
+            # --- Step 4: Wait for POST response ---
+            max_wait_ms = min(response_timeout + 10, 40) * 1000
+            start = time.ticks_ms()
+            response = ""
+
+            while time.ticks_diff(time.ticks_ms(), start) < max_wait_ms:
+                available = getattr(self.uart, "in_waiting", 0)
+                if available:
+                    chunk = self.uart.read(available)
+                    if chunk:
+                        try:
+                            response += chunk.decode("utf-8")
+                        except Exception:
+                            try:
+                                response += chunk.decode("latin-1")
+                            except Exception:
+                                pass
+
+                    # Look for +QHTTPPOST: response - only parse once the full line
+                    # has arrived (newline present) to avoid IndexError on partial reads.
+                    if (
+                        "+QHTTPPOST:" in response
+                        and "\n" in response.split("+QHTTPPOST:")[1]
+                    ):
+                        # Queue/EC200 often returns responses:
+                        # - +QHTTPPOST: <err>,<http_code>,<content_length>, e.g: +QHTTPPOST: 0,200,106
+                        # - +QHTTPPOST: <err>   (some errors return only the first field), e.g: +QHTTPPOST: 702
+                        try:
+                            raw_after = response.split("+QHTTPPOST:")[1]
+                            post_line = raw_after.split("\n")[0].strip()
+                            tokens = [t.strip() for t in post_line.split(",")]
+
+                            def _to_int(s, default=0):
+                                try:
+                                    return int(s)
+                                except Exception:
+                                    return default
+
+                            err = _to_int(tokens[0], default=-1) if len(tokens) >= 1 else -1
+                            http_code = _to_int(tokens[1], default=0) if len(tokens) >= 2 else 0
+
+                            if err == 0 and http_code == 200:
+                                # Step 5: Read response data (shorter read timeout)
+                                read_timeout = min(max(response_timeout, 10), 40)
+                                success, read_resp = await self._send_command(
+                                    "AT+QHTTPREAD=80", timeout=read_timeout
+                                )
+                                self.on_upload_success()
+                                self.is_busy = False
+                                return True, http_code, read_resp
+                            else:
+                                self.on_upload_fail()
+                                if err == 702:
+                                    err = f"{err}, Socket Error or HTTP Request Failure"
+                                    await self._http_stop()
+                                if http_code:
+                                    self.is_busy = False
+                                    return (
+                                        False,
+                                        http_code,
+                                        f"HTTP Error: {http_code} (QHTTPPOST err={err})",
+                                    )
+                                self.is_busy = False
+                                return False, 0, f"POST failed: QHTTPPOST err={err}"
+                        except Exception as e:
+                            self.is_busy = False
+                            return (
+                                False,
+                                0,
+                                f"Failed to parse response: {str(e)}, Response: {response}",
+                            )
+
+                    if "ERROR" in response:
+                        self.on_upload_fail()
+                        self.is_busy = False
+                        return False, 0, f"POST failed: {response}"
+
+                await asyncio.sleep(0.02)
             
-        self.on_upload_fail()
-        self.is_busy = False
-        return False, 0, "POST timeout"
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "POST timeout"
+
+        except Exception as e:
+            logger.error("[CELL] Upload exception: %s" % e)
+            self.on_upload_fail()
+            self.is_busy = False
+            return False, 0, "Upload exception: %s" % e
 
     def on_upload_fail(self):
         self._upload_fail_count += 1
