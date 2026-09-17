@@ -2489,9 +2489,11 @@ def process_message(databytes, rssi=None, snr=None):
             alldone, missing_bytes, filedata_id, recompiled_msgbytes, epoch_ms = end_chunk(msgbytes.decode()) # TODO later, check how can we validate file
         except UnicodeError as e:
             logger.error(f"[IMG RX] Unicode decode error in End chunk: {e} : {msgbytes}")
+            sys.print_exception(e)
             return False
         except Exception as e:
             logger.error(f"[IMG RX] Error in end_chunk for End chunk: {e}")
+            sys.print_exception(e)
             return False
         if alldone:
             if recompiled_msgbytes:
@@ -2507,6 +2509,7 @@ def process_message(databytes, rssi=None, snr=None):
                         logger.info(f"[IMG RX] ✔✔✔ [VALID MD5 FILE] for the file got transferred")
                 except Exception as e:
                     logger.error(f"[IMG RX] Error checking md5 for the file got transferred: {e}")
+                    sys.print_exception(e)
                     del recompiled_msgbytes
                     gc.collect()
                     return False
@@ -2515,6 +2518,7 @@ def process_message(databytes, rssi=None, snr=None):
                     cleanup_chunk_map_by_msg_id(filedata_id)
                 except Exception as e:
                     logger.error(f"[IMG RX] Error cleaning up chunk map for filedata_id {filedata_id}: {e}")
+                    sys.print_exception(e)
 
                 try:
                     async def _chunk_end_send_or_enqueue(trans_msg_typ_curr, trans_md5_curr):
@@ -2530,8 +2534,9 @@ def process_message(databytes, rssi=None, snr=None):
                             )
                             try:
                                 del recompiled_msgbytes
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after send/enqueue fail: {e}")
+                                sys.print_exception(e)
                             gc.collect()
                             return
                         logger.info(f"[CHUNK] file type={trans_msg_typ_curr} sent or queued for {creator}_{epoch_ms}.enc")
@@ -2548,6 +2553,7 @@ def process_message(databytes, rssi=None, snr=None):
                                     logger.info(f"[IMG RX] Saved raw image: {creator}_{epoch_ms}_raw.jpg: raw size = {len(img_bytes)} bytes")
                                 except Exception as e:
                                     logger.error(f"[IMG RX] Failed to decrypt/save raw image: {e}")
+                                    sys.print_exception(e)
                                 finally:
                                     if img_bytes is not None:
                                         del img_bytes
@@ -2555,10 +2561,12 @@ def process_message(databytes, rssi=None, snr=None):
                                         del img
                             except Exception as e:
                                 logger.error(f"[IMG RX] Failed to decrypt/save raw image: {e}")
+                                sys.print_exception(e)
                         try:
                             del recompiled_msgbytes
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after chunk end: {e}")
+                            sys.print_exception(e)
                         gc.collect()
 
 
@@ -2578,10 +2586,12 @@ def process_message(databytes, rssi=None, snr=None):
                     asyncio.create_task(_chunk_end_send_or_enqueue(trans_msg_typ_copy, trans_chunk_md5_copy))
                 except Exception as e:
                     logger.error(f"[IMG RX] Error scheduling chunk end (send/enqueue): {e}")
+                    sys.print_exception(e)
                     try:
                         del recompiled_msgbytes
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after schedule fail: {e}")
+                        sys.print_exception(e)
                     gc.collect()
             else:
                 logger.warning(f"[CHUNK] img not recompiled, might have complied last time")
