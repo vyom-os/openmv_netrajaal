@@ -27,7 +27,7 @@ from config import (
     VERSION,
     get_version_str
 )
-from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes
+from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes, get_uptime_seconds
 from sx1262 import SX1262
 from gps_driver import GPSDriver
 from internet_driver import InternetDriver, UART_HEALTH_INTERVAL_SEC, SIM_UNDETECTED_INTERVAL_SEC, FAILED_RE_CONFIGURE_INTERVAL_SEC, FAILED_INTERNET_RETRY_INTERVAL_SEC_CC, FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT, SUCCESS_INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
@@ -87,17 +87,41 @@ is_install_mode = False
 # FIXED VARIABLES
 led = LED("LED_BLUE")
 led.off()
+# -----------------------------------▲▲▲▲▲-----------------------------------
 
-# TIME VARS
-MIN_SLEEP = 0.1    # max 0.1, 0.02 (works with highest data rate)
-ACK_SLEEP = 1       # max 2, 1 (works with highest data rate)
-CHUNK_SLEEP = 0.1  # max 0.1, 0.04 (works with highest data rate)
 
+
+
+# -----------------------------------▼▼▼▼▼-----------------------------------
 # SIZE VARS
 CHUNK_DATA_SIZE = 45
 PACKET_PAYLOAD_LIMIT = 60
 PACKET_BODY_LIMIT = 50
 RSA_ENCRYPTION_LIMIT = 117
+
+# FILE CHUNKING VARS
+MSG_TYPE_BYTE_LEN = 1
+NODE_ID_BYTE_LEN = 1
+MSG_ID_BYTE_LEN = 3
+MSG_UID_LEN = MSG_TYPE_BYTE_LEN + 3*NODE_ID_BYTE_LEN + MSG_ID_BYTE_LEN
+# PACKET CRC CHECKSUM LEN
+CRC_CHECKSUM_LEN = 4
+HEADER_LEN = MSG_UID_LEN + CRC_CHECKSUM_LEN
+HEADER_JOINED_LEN = HEADER_LEN + 1 # 1 byte for ; separator, total 12 bytes for now
+
+IMG_ID_LEN = 3 # UXK, BTQ
+IMG_ID_BYTES = 2
+CHUNK_ID_BYTES = 2
+# -----------------------------------▲▲▲▲▲-----------------------------------
+
+
+
+
+# -----------------------------------▼▼▼▼▼-----------------------------------
+# TIME VARS
+MIN_SLEEP = 0.1    # max 0.1, 0.02 (works with highest data rate)
+ACK_SLEEP = 1       # max 2, 1 (works with highest data rate)
+CHUNK_SLEEP = 0.1  # max 0.1, 0.04 (works with highest data rate)
 
 HB_WAIT = 180
 D_MSG_WAIT = 60
@@ -124,6 +148,8 @@ TRANSMODE_LOCK_TIMEOUT = 600 # TODO PRODUCTION
 TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
 CHUNK_BURST_SIZE = 50
 CHUNK_BURST_RX_SLEEP = 0.4
+
+
 # Config test for SF7
 LORA_FREQ = 868.0
 LORA_BW = 125             # 125kHz provides better sensitivity than wider bandwidths
@@ -160,7 +186,7 @@ gps_last_time = -1
 consecutive_hb_failures = 0
 lora_init_count = 0
 lora_init_in_progress = False
-lora_last_corrupt_reset_ms = 0
+lora_last_recover_ms = 0
 
 trans_in_progress = False
 trans_paired_device = None
@@ -193,6 +219,8 @@ CHUNK_STORAGE_BUFFER = None
 # radio sent
 radio_sent_succ_count = 0
 radio_sent_fail_count = 0
+LORA_CONTINUOUS_SENT_ERROR_LIMIT = 5
+lora_continuous_sent_error_count = 0
 # radio receive
 radio_recd_succ_count = 0
 radio_recd_err_count = 0
@@ -225,26 +253,6 @@ packet_queue_lock = asyncio.Lock()  # Lock for thread-safe queue access
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
 
-# FILE CHUNKING VARS
-MSG_TYPE_BYTE_LEN = 1
-NODE_ID_BYTE_LEN = 1
-MSG_ID_BYTE_LEN = 3
-MSG_UID_LEN = MSG_TYPE_BYTE_LEN + 3*NODE_ID_BYTE_LEN + MSG_ID_BYTE_LEN
-# PACKET CRC CHECKSUM LEN
-CRC_CHECKSUM_LEN = 4
-HEADER_LEN = MSG_UID_LEN + CRC_CHECKSUM_LEN
-HEADER_JOINED_LEN = HEADER_LEN + 1 # 1 byte for ; separator
-
-IMG_ID_LEN = 3 # UXK, BTQ
-IMG_ID_BYTES = 2
-CHUNK_ID_BYTES = 2
-
-
-
-# -----------------------------------▼▼▼▼▼-----------------------------------
-# --------- DEBUGGING ONLY ---- REMOVE BEFORE FINAL -------------------------
-# --------- DEBUGGING ONLY ---- REMOVE BEFORE FINAL -------------------------
-# -----------------------------------▲▲▲▲▲-----------------------------------
 
 
 encnode = None
@@ -440,7 +448,6 @@ def get_msg_header(msg_typ, creator, dest, msgbytes):
 
     Returns:
         tuple[bytes, bytes]: (msg_uid, crc_checksum) => 7 + 4 = 11 bytes.
-            Wire format: msg_uid + crc_checksum + b";" + msgbytes (12 + len(msgbytes) bytes).
     """
     rrr = get_rand(len=3)
     msg_uid = (
@@ -514,10 +521,10 @@ def ellepsis(msg):
 
 def ack_needed(msg_typ): # msg_type P is devided in (B,I,E)
     # Input: msg_typ: str; Output: bool indicating if acknowledgement required
-    if msg_typ in ["A", "W", "N", "I", "K"]:
+    if msg_typ in ["A", "W", "N", "I", "K", "U", "V"]:
         return False
     # H = heartbeat (separate blocks); K = Android/app-origin message
-    if msg_typ in ["H", "B", "E", "V", "C", "Z"]:
+    if msg_typ in ["H", "B", "E", "C", "Z"]:
         return True
     return False
 
@@ -526,9 +533,6 @@ sensor.set_pixformat(sensor.RGB565)
 sensor.set_framesize(sensor.HD)
 sensor.skip_frames(time=2000)
 power_mgmt.camera_sleep()  # sleep until first capture
-
-sent_count = 0
-recv_msg_count = {}
 
 URL_OLD = "https://n8n.vyomos.org/webhook/watchmen-detect/"
 # URL = "https://hqapi.vyomos.org/watchmen-detect/"
@@ -886,25 +890,25 @@ def reset_lora(verify=True):
     logger.info("[LORA] Hardware reset (NRESET/P6) complete — re-init required")
     return True
 
-async def reset_lora_on_corruption(reason):
-    """Fatal-log, hardware-reset, and re-init when send/recv is corrupted. Cooldown 30s."""
+async def recover_lora(reason):
+    """Hardware-reset and re-init LoRa. Cooldown 30s. reason says why."""
     try:
-        global lora_last_corrupt_reset_ms, LORA_RESET_INTERVAL_SEC
+        global lora_last_recover_ms, LORA_RESET_INTERVAL_SEC
         if lora_init_in_progress:
             return False
         now = get_ms_diff()
-        if lora_last_corrupt_reset_ms and (now - lora_last_corrupt_reset_ms) < LORA_RESET_INTERVAL_SEC * 1000:
+        if lora_last_recover_ms and (now - lora_last_recover_ms) < LORA_RESET_INTERVAL_SEC * 1000:
             logger.warning(f"[LORA] Reset already attempted within last {LORA_RESET_INTERVAL_SEC} seconds, skipping reset...")
             return False
-        lora_last_corrupt_reset_ms = now
-        logger.fatal(f"[LORA] send/recv corrupted, resetting: {reason}")
+        lora_last_recover_ms = now
+        logger.fatal(f"[LORA] recovering radio: {reason}")
         reset_lora()
         succ = await init_lora()
         if succ:
             snapshot_radio_health_window()
         return succ
     except Exception as e:
-        logger.error(f"[LORA] ✘✘✘ Error resetting LoRa on corruption: {e}")
+        logger.error(f"[LORA] ✘✘✘ Error recovering LoRa: {e}")
         return False
 
 def lora_event_callback(events): # TODO Anand, merge radio_read into this function
@@ -982,79 +986,80 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             logger.error(f"[LORA] Error clearing interrupt status: {e}")
 
 
-async def lora_health_monitor():  # is_lora_ready is nit being used
+async def lora_health_monitor():  # is_lora_ready is not being used
     global loranode, lora_init_in_progress
     global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_crcerr_count, radio_recd_hasherr_count
     global radio_succ_count_prev, radio_fail_count_prev
     RADIO_HEALTH_INTERVAL = 120
     while True:
-        if lora_init_in_progress:
-            await asyncio.sleep(RADIO_HEALTH_INTERVAL)
-            continue
-        else:
-            try:
-                if loranode is None:
-                    logger.info(f"[LORA] LoRa not initialized, initializing...")
-                    succ = await init_lora()
+        try:
+            if lora_init_in_progress:
+                await asyncio.sleep(RADIO_HEALTH_INTERVAL)
+                continue
+
+            if loranode is None:
+                logger.info(f"[LORA] LoRa not initialized, initializing...")
+                succ = await init_lora()
+                if not succ:
+                    logger.error(
+                        f"[LORA] Failed to initialize LoRa, retrying in 60 seconds"
+                    )
+                else:
+                    snapshot_radio_health_window()
+                    logger.info(f"[LORA] LoRa initialized successfully")
+                await asyncio.sleep(RADIO_HEALTH_INTERVAL)
+                continue
+
+            # loranode might be invalid
+            radio_succ_count = radio_sent_succ_count + radio_recd_succ_count
+            radio_fail_count = (
+                radio_sent_fail_count
+                + radio_recd_err_count
+                + radio_recd_crcerr_count
+                + radio_recd_hasherr_count
+            )
+
+            succ_diff = radio_succ_count - radio_succ_count_prev
+            fail_diff = radio_fail_count - radio_fail_count_prev
+
+            total_msg = max(succ_diff + fail_diff, 1)
+            error_percentage = int(max(fail_diff, 0) * 100 / total_msg)
+            if total_msg >= 20:  # for 20 msg, check 50% error
+                if error_percentage >= 50:
+                    succ = await recover_lora(
+                        f"error pct: {error_percentage}%"
+                    )
                     if not succ:
                         logger.error(
                             f"[LORA] Failed to initialize LoRa, retrying in 60 seconds"
                         )
                     else:
-                        snapshot_radio_health_window()
                         logger.info(f"[LORA] LoRa initialized successfully")
-                    await asyncio.sleep(RADIO_HEALTH_INTERVAL)
-                    continue
-                else:  # loranode might be invalid
-                    radio_succ_count = radio_sent_succ_count + radio_recd_succ_count
-                    radio_fail_count = (
-                        radio_sent_fail_count
-                        + radio_recd_err_count
-                        + radio_recd_crcerr_count
-                        + radio_recd_hasherr_count
-                    )
-
-                    succ_diff = radio_succ_count - radio_succ_count_prev
-                    fail_diff = radio_fail_count - radio_fail_count_prev
-
-                    total_msg = max(succ_diff + fail_diff, 1)
-                    error_percentage = int(max(fail_diff, 0) * 100 / total_msg)
-                    if total_msg >= 20:  # for 20 msg, check 50% error
-                        if error_percentage >= 50:
-                            succ = await reset_lora_on_corruption(
-                                f"error pct: {error_percentage}%"
-                            )
-                            if not succ:
-                                logger.error(
-                                    f"[LORA] Failed to initialize LoRa, retrying in 60 seconds"
-                                )
-                            else:
-                                logger.info(f"[LORA] LoRa initialized successfully")
-                        else:
-                            logger.info("Radio is working fine")
-                        await asyncio.sleep(RADIO_HEALTH_INTERVAL)
-                    elif total_msg >= 10:  # for 10 msg, check 80% error
-                        if error_percentage >= 80:
-                            succ = await reset_lora_on_corruption(
-                                f"error pct: {error_percentage}%"
-                            )
-                            if not succ:
-                                logger.error(
-                                    f"[LORA] Failed to initialize LoRa, retrying in 60 seconds"
-                                )
-                            else:
-                                logger.info(f"[LORA] LoRa initialized successfully")
-                        else:
-                            logger.info("Radio is working fine")
-                        await asyncio.sleep(RADIO_HEALTH_INTERVAL)
-                    else:
-                        logger.debug(
-                            f"less radio steps available, will re-analyse later."
-                        )
-                        await asyncio.sleep(RADIO_HEALTH_INTERVAL)
-            except Exception as e:
-                await reset_lora_on_corruption(f"health monitor exception: {e}")
+                else:
+                    logger.info("Radio is working fine")
                 await asyncio.sleep(RADIO_HEALTH_INTERVAL)
+            elif total_msg >= 10:  # for 10 msg, check 80% error
+                if error_percentage >= 80:
+                    succ = await recover_lora(
+                        f"error pct: {error_percentage}%"
+                    )
+                    if not succ:
+                        logger.error(
+                            f"[LORA] Failed to initialize LoRa, retrying in 60 seconds"
+                        )
+                    else:
+                        logger.info(f"[LORA] LoRa initialized successfully")
+                else:
+                    logger.info("Radio is working fine")
+                await asyncio.sleep(RADIO_HEALTH_INTERVAL)
+            else:
+                logger.debug(
+                    f"less radio steps available, will re-analyse later."
+                )
+                await asyncio.sleep(RADIO_HEALTH_INTERVAL)
+        except Exception as e:
+            await recover_lora(f"health monitor exception: {e}")
+            await asyncio.sleep(RADIO_HEALTH_INTERVAL)
 
 
 def is_lora_ready():
@@ -1275,16 +1280,21 @@ async def periodic_health_stats_loop():
 
 def radio_send(dest, data, msg_uid):
     # Input: dest: int, data: bytes; Output: None (sends bytes via LoRa, logs send)
-    global sent_count
-    sent_count = sent_count + 1
+    global lora_continuous_sent_error_count
     if len(data) > 254:
         return False, f"[LORA] msg too large : {len(data)}"
 
     # New driver sends raw bytes (destination is already in the data packet header)
     bytes_sent, status = loranode.send(data)
     if status != ERR_NONE:
-        asyncio.create_task(reset_lora_on_corruption(f"PHY send failed, status: {status}"))
+        lora_continuous_sent_error_count += 1
+        if lora_continuous_sent_error_count >= LORA_CONTINUOUS_SENT_ERROR_LIMIT:
+            asyncio.create_task(recover_lora(
+                f"PHY send failed {lora_continuous_sent_error_count} times in a row, status: {status}"
+            ))
+            lora_continuous_sent_error_count = 0
         return False, f"[LORA] Send failed with status: {status}"
+    lora_continuous_sent_error_count = 0
     # Map 0-210 bytes to 1-10 asterisks, anything above 210 = 10 asterisks
     # data_masked_log = min(10, max(1, (len(data) + 20) // 21))
     # logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {len(data)} bytes, MSG_UID = {msg_uid}")
@@ -1295,31 +1305,31 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
     try:
         # Input: msg_typ: str, creator: int, msgbytes: bytes, dest: int; Output: tuple(success: bool, missing_chunks: list)
         msg_uid, crc_checksum = get_msg_header(msg_typ, creator, dest, msgbytes)
-        databytes = msg_uid + crc_checksum + b";" + msgbytes
+        payload_bytes = msg_uid + crc_checksum + b";" + msgbytes # HEADER + CRC + SEPARATOR + BODY (HEADER_JOINED_LEN + PACKET_BODY_LIMIT)
         ackneeded = ack_needed(msg_typ)
         sent_time = get_ms_diff()
 
-        data_masked_log = min(10, max(1, (len(databytes) + 20) // 21))
+        data_masked_log = min(10, max(1, (len(payload_bytes) + 20) // 21))
 
         if not ackneeded:
-            succ, err = radio_send(dest, databytes, msg_uid)
+            succ, err = radio_send(dest, payload_bytes, msg_uid)
             if not succ:
                 radio_sent_fail_count += 1
                 logger.error(f"[LORA] Error sending message: {err}, MSG_UID = {msg_uid}")
                 return (False, [])
-            radio_sent_succ_count += 1
+            # Do not increment radio_sent_succ_count: PHY ERR_NONE does not prove it
             await asyncio.sleep(MIN_SLEEP)
             if msg_typ != "I":
-                logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {databytes} bytes, MSG_UID = {msg_uid}")
+                logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {payload_bytes} bytes, MSG_UID = {msg_uid}")
             return (True, [])
 
         for retry_i in range(retry_count):
-            succ, err = radio_send(dest, databytes, msg_uid)
+            succ, err = radio_send(dest, payload_bytes, msg_uid)
             if not succ:
                 logger.error(f"[LORA] Error sending message {1+retry_i}/{retry_count}: {err}, MSG_UID = {msg_uid}")
                 continue
             if msg_typ != "I":
-                logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {databytes} bytes, MSG_UID = {msg_uid}")
+                logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {payload_bytes} bytes, MSG_UID = {msg_uid}")
             await asyncio.sleep(ACK_SLEEP)
             first_log_flag = True
             ack_msg_recheck_count = 3
@@ -2422,9 +2432,6 @@ def process_message(databytes, rssi=None, snr=None):
         logger.info(f"[{recv_log} from {sender}{rf_log}] [{'*' * data_masked_log}] {len(databytes)} bytes, MSG_UID = {msg_uid}")
 
     # logger.info(f"[PARSED HEADER] msg_uid:{msg_uid}, msg_typ:{msg_typ}, creator:{creator}, sender:{sender}, receiver:{receiver}, len-msgbytes:{len(msgbytes)}")
-    if sender not in recv_msg_count:
-        recv_msg_count[sender] = 0
-    recv_msg_count[sender] += 1
     ackmessage = msg_uid
     if msg_typ == "H":
         asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
@@ -2781,7 +2788,7 @@ async def keep_generating_heartbeat():
                 print_resume = False
                 print_pause = True
 
-            if running_as_unit() and len(network_paths)==0:
+            if running_as_unit() and len(network_paths) == 0:
                 logger.debug("Not sending heartbeat, because I am a unit with no network paths")
                 await asyncio.sleep(5)
                 continue
@@ -2860,6 +2867,8 @@ def next_device_in_spath():
 async def network_request_loop():
     global network_paths, seen_neighbours, NETWORK_EMPTY_SLEEP, NETWORK_IN_TRANS_SLEEP, NETWORK_IMPROVE_SLEEP, NETWORK_IMPROVE_COUNT, NETWORK_STABLE_SLEEP
     network_improve_count = NETWORK_IMPROVE_COUNT
+    monitoring_start_utime = get_uptime_seconds()
+    NO_NEIGHBOUR_RADIO_RESET_SEC = 1200  # 20 minutes
     while True:
         try:
             # clean any old spath
@@ -2886,6 +2895,15 @@ async def network_request_loop():
             scanmsg = encode_node_id(my_addr)
             # 65535 is for Broadcast
             await send_msg("X", my_addr, scanmsg, 65535)
+            
+            if len(seen_neighbours) == 0:
+                time_since_monitoring = get_uptime_seconds() - monitoring_start_utime
+                if time_since_monitoring >= NO_NEIGHBOUR_RADIO_RESET_SEC:
+                    logger.error(f"[NET] - No neighbour discovered for {time_since_monitoring}s (>= {NO_NEIGHBOUR_RADIO_RESET_SEC}s), recovering radio...")
+                    await recover_lora(f"no neighbour discovered for {time_since_monitoring}s (>= {NO_NEIGHBOUR_RADIO_RESET_SEC}s)")
+                    await asyncio.sleep(120)
+            else:
+                monitoring_start_utime = get_uptime_seconds()
 
             if len(network_paths) == 0 and running_as_unit():
                 logger.info(f"[NET] - sleeping for {NETWORK_EMPTY_SLEEP} seconds, for next network `discovery`")
