@@ -197,7 +197,7 @@ trans_chunks_count = 0
 trans_chunk_epoch_ms = None
 trans_chunk_md5 = None
 trans_prev_data_id = None
-trans_last_actvity_time = None
+trans_last_actvity_uptime = None
 img_chunk_rssi_snr = []  # RSSI/SNR of image I-packets since last progress log
 img_last_logged_received = 0
 
@@ -576,68 +576,56 @@ async def keep_transmode_lock(device_id, filedata_id):
     # Input: None; Output: None (sets trans_in_progress flag with auto release after timeout / inactivity)
     global trans_in_progress, trans_paired_device
     global trans_data_id, trans_msg_typ, trans_chunks_count, trans_chunk_epoch_ms, trans_chunk_md5
-    global trans_last_actvity_time, img_chunk_rssi_snr, img_last_logged_received
+    global trans_last_actvity_uptime, img_chunk_rssi_snr, img_last_logged_received
 
-    # Track when this lock started
-    start_ms = get_epoch_ms()
+    # Track when this lock started (uptime, not epoch — GPS time updates must not expire the lock)
+    start_uptime = get_uptime_seconds()
 
     # If we don't have any activity yet, treat "now" as the last activity
-    if trans_last_actvity_time is None:
-        trans_last_actvity_time = start_ms
+    if trans_last_actvity_uptime is None:
+        trans_last_actvity_uptime = start_uptime
 
-    while True:
-        await asyncio.sleep(5)
-        if not (trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id):
-            logger.debug(
-                f"[IMG] ○○○○○○○○○○❯❯ TRANS MODE already ended, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id} ❮❮○○○○○○○○○○"
-            )
-            break
+    try:
+        while True:
+            await asyncio.sleep(5)
+            if not (trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id):
+                logger.debug(
+                    f"[IMG] ○○○○○○○○○○❯❯ TRANS MODE already ended, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id} ❮❮○○○○○○○○○○"
+                )
+                break
 
-        now_ms = get_epoch_ms()
-        timeout_expired = (now_ms - start_ms) >= TRANSMODE_LOCK_TIMEOUT * 1000
-        inactivity_expired = (now_ms - trans_last_actvity_time) >= TRANSMODE_INACTIVITY_LIMIT * 1000
-        if timeout_expired or inactivity_expired:
-            reason = []
-            if timeout_expired:
-                reason.append("MAX_TIMEOUT")
-            if inactivity_expired:
-                reason.append("INACTIVITY_TIMEOUT")
-            reason_str = "&".join(reason)
-
-            logger.warning(
-                f"[IMG] ●●●●●●●●●●❯❯ TRANS MODE ended, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, by {reason_str} ❮❮●●●●●●●●●●"
-            )
-
-            chunks_to_clear = trans_chunks_count
-            was_receiving = chunks_to_clear and chunks_to_clear > 0
-            trans_in_progress = False
-            trans_paired_device = None
-            trans_data_id = None
-            trans_msg_typ = None
-            trans_chunks_count = 0
-            trans_chunk_md5 = None
-            trans_last_actvity_time = None
-            img_chunk_rssi_snr = []
-            img_last_logged_received = 0
-
-            if was_receiving:
-                reset_trans_chunk_storage(chunks_to_clear)
-                trans_chunk_epoch_ms = None
-            gc.collect()
-            logger.debug(
-                f"[MEM] Cleared old chunks in get_transmode_lock for filedata_id={filedata_id}, by {reason_str} "
-            )
-            break
+            now_uptime = get_uptime_seconds()
+            timeout_expired = (now_uptime - start_uptime) >= TRANSMODE_LOCK_TIMEOUT
+            inactivity_expired = (now_uptime - trans_last_actvity_uptime) >= TRANSMODE_INACTIVITY_LIMIT
+            if timeout_expired or inactivity_expired:
+                reason = []
+                if timeout_expired:
+                    reason.append("MAX_TIMEOUT")
+                if inactivity_expired:
+                    reason.append("INACTIVITY_TIMEOUT")
+                reason_str = "&".join(reason)
+                logger.warning(
+                    f"[IMG] ●●●●●●●●●●❯❯ TRANS MODE ended, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, by {reason_str} ❮❮●●●●●●●●●●"
+                )
+                break
+    except Exception as e:
+        logger.error(
+            f"[IMG] TRANS MODE loop error, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, error={e}"
+        )
+    finally:
+        # Close only if this transfer still owns the lock (error, timeout, or unexpected exit)
+        if trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id:
+            delete_transmode_lock(device_id, filedata_id)
 
 def check_transmode_lock(device_id, filedata_id): # check if transfer lock is active or not
     global trans_in_progress, trans_paired_device
-    global trans_data_id, trans_last_actvity_time
+    global trans_data_id, trans_last_actvity_uptime
     # # If filedata_id is None, only check device_id (for backward compatibility)
     # if filedata_id is None: # TODO
     #     return trans_in_progress and trans_paired_device == device_id
     # # Otherwise check both device_id and filedata_id
     if trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id:
-        trans_last_actvity_time = get_epoch_ms()
+        trans_last_actvity_uptime = get_uptime_seconds()
         return True
     else:
         return False
@@ -647,7 +635,7 @@ def delete_transmode_lock(device_id, filedata_id, trans_success=False): # called
     # Input: None; Output: None (clears trans_in_progress flag)
     global trans_in_progress, trans_paired_device
     global trans_data_id, trans_msg_typ, trans_chunks_count, trans_chunk_epoch_ms, trans_prev_data_id, trans_chunk_md5
-    global trans_last_actvity_time, img_chunk_rssi_snr, img_last_logged_received
+    global trans_last_actvity_uptime, img_chunk_rssi_snr, img_last_logged_received
     if trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id:  # TODO, these has to handled using someuniqueness
         logger.info(f"[IMG] ●●●●●●●●●●❯❯ TRANS MODE ended for device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, by logic ❮❮●●●●●●●●●●")
         chunks_to_clear = trans_chunks_count
@@ -658,7 +646,7 @@ def delete_transmode_lock(device_id, filedata_id, trans_success=False): # called
         trans_msg_typ = None
         trans_chunks_count = 0
         trans_chunk_md5 = None
-        trans_last_actvity_time = None
+        trans_last_actvity_uptime = None
         img_chunk_rssi_snr = []
         img_last_logged_received = 0
         if trans_success:
