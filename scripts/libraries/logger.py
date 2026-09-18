@@ -2,7 +2,7 @@ from collections import deque
 from config import save_log_entry
 from clock_utils import get_epoch_ms
 
-SAVE_FATAL_LOGS = False
+SAVE_FATAL_LOGS = True
 
 log_q_len = 100
 saved_logs = deque([], log_q_len)

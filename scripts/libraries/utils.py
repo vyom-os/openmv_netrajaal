@@ -1,6 +1,7 @@
 import struct
 import gc
 import utime
+import machine
 
 # Binary header prepended to JPEG bytes before base64 upload (API strips first N bytes).
 # 2-byte LE payload length + 20-byte payload (lat, lon, epoch, image_id, type).
@@ -119,6 +120,11 @@ def get_uptime_seconds():
         return utime.ticks_ms() // 1000
     except Exception:
         return 0
+
+
+def reboot_device():
+    print("REBOOTING DEVICE\n\n")
+    machine.reset()
 
 
 def build_dummy_heartbeat_payload(version):

@@ -36,6 +36,7 @@ import detect
 from detect import PIR_PIN, turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 from watchdog import start_watchdog, check_watchdog_reset
+from supervisor import supervised
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # -------------------- TESTING VARIABLES, TODO PRODUCTION --------------------
@@ -3414,7 +3415,7 @@ async def main():
     global app_handler, app_controller
     print(f"Entering MAIN loop... [PROCESS MODE]")
     # await led_restart_blinker()
-    asyncio.create_task(keep_blinking_restart_led())
+    asyncio.create_task(supervised("keep_blinking_restart_led", keep_blinking_restart_led))
 
     if not await init_device():
         await asyncio.sleep(10)
@@ -3423,10 +3424,10 @@ async def main():
     start_watchdog()
 
     # HEALTH STATS ===>
-    asyncio.create_task(periodic_health_stats_loop())
+    asyncio.create_task(supervised("periodic_health_stats_loop", periodic_health_stats_loop))
 
     await init_tracx_internet()
-    asyncio.create_task(keep_checking_internet())
+    asyncio.create_task(supervised("keep_checking_internet", keep_checking_internet))
 
     def clear_install_mode_flag():
         print(f"clear install mode flag")
@@ -3442,24 +3443,24 @@ async def main():
 
     # RADIO, QUEUE =====>
     await init_lora()
-    asyncio.create_task(lora_health_monitor())
+    asyncio.create_task(supervised("lora_health_monitor", lora_health_monitor))
 
-    asyncio.create_task(radio_read())
-    asyncio.create_task(process_packet_queue())
+    asyncio.create_task(supervised("radio_read", radio_read))
+    asyncio.create_task(supervised("process_packet_queue", process_packet_queue))
     asyncio.create_task(keep_updating_gps())  # don't move this keep running function
     await asyncio.sleep(1)
-    asyncio.create_task(network_request_loop())
-    asyncio.create_task(keep_generating_heartbeat())
-    asyncio.create_task(keep_generating_debugmsg())
+    asyncio.create_task(supervised("network_request_loop", network_request_loop))
+    asyncio.create_task(supervised("keep_generating_heartbeat", keep_generating_heartbeat))
+    asyncio.create_task(supervised("keep_generating_debugmsg", keep_generating_debugmsg))
 
     # IMAGE DETECTION =====>
-    asyncio.create_task(person_detection_loop())
+    asyncio.create_task(supervised("person_detection_loop", person_detection_loop))
 
     # TRANSMISION =====>
-    asyncio.create_task(image_sending_loop())
+    asyncio.create_task(supervised("image_sending_loop", image_sending_loop))
 
     # POWER SAVE (machine.idle when safe) =====>
-    asyncio.create_task(power_save_loop())
+    asyncio.create_task(supervised("power_save_loop", power_save_loop))
 
     for i in range(24*7*8):  # total 8 weeks runtime
         await asyncio.sleep(3600)
