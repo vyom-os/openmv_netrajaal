@@ -119,3 +119,45 @@ def get_uptime_seconds():
         return utime.ticks_ms() // 1000
     except Exception:
         return 0
+
+
+def build_dummy_heartbeat_payload(version):
+    """
+    Fixed 44-byte fallback heartbeat (same layout as main.build_heartbeat_payload):
+      image counters 0, radio/internet/fs counters 0,
+      empty neighbours, empty shortest path,
+      process_id '***', packed version, remaining fields 0.
+    """
+    hbmsg_bytes = b""
+    hbmsg_bytes += int_to_nbytes(0, 2)  # image_taken
+    hbmsg_bytes += int_to_nbytes(0, 2)  # image_sent
+    hbmsg_bytes += int_to_nbytes(0, 2)  # image_dropped
+    hbmsg_bytes += int_to_nbytes(0, 2)  # image_failed
+    hbmsg_bytes += int_to_nbytes(0, 2)  # image_queued
+    hbmsg_bytes += int_to_nbytes(0, 3)  # radio_succ
+    hbmsg_bytes += int_to_nbytes(0, 3)  # radio_err
+    hbmsg_bytes += int_to_nbytes(0, 3)  # internet_succ
+    hbmsg_bytes += int_to_nbytes(0, 3)  # internet_err
+    hbmsg_bytes += int_to_nbytes(0, 2)  # fs_succ
+    hbmsg_bytes += int_to_nbytes(0, 2)  # fs_err
+    for _ in range(3):
+        hbmsg_bytes += int_to_nbytes(0, 1)  # neighbours
+    for _ in range(3):
+        hbmsg_bytes += int_to_nbytes(0, 1)  # shortest_path
+    hbmsg_bytes += b"***"  # process_id
+    hbmsg_bytes += int_to_nbytes(version, 2)
+    hbmsg_bytes += int_to_nbytes(0, 1)  # signal_strength
+    hbmsg_bytes += int_to_nbytes(0, 1)  # network_type
+    hbmsg_bytes += int_to_nbytes(0, 1)  # is_cc_unit
+    hbmsg_bytes += int_to_nbytes(0, 2)  # free_memory
+    hbmsg_bytes += int_to_nbytes(0, 2)  # device_uptime
+    return hbmsg_bytes
+
+
+if __name__ == "__main__":
+    EXPECTED_LEN = 44
+    payload = build_dummy_heartbeat_payload(2001)
+    print("len:", len(payload), "expected:", EXPECTED_LEN)
+    assert len(payload) == EXPECTED_LEN
+    print("OK")
+

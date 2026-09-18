@@ -406,27 +406,34 @@ class SX126X:
         return state
 		
     def startReceive(self, timeout=SX126X_RX_TIMEOUT_INF):
-        state = ERR_NONE
+        # Always reach setRx(). A SPI glitch in getPacketType() used to
+        # return ERR_UNKNOWN / ASSERT before SetRx, leaving the chip in
+        # standby after TX or a CRC packet — RX then stays silent while TX still works.
+        self.clearIrqStatus()
         modem = self.getPacketType()
+        if modem not in (SX126X_PACKET_TYPE_LORA, SX126X_PACKET_TYPE_GFSK):
+            modem = self.getPacketType()
+        state = ERR_NONE
         if modem == SX126X_PACKET_TYPE_LORA:
             if self._rxIq:
                 self._invertIQ = SX126X_LORA_IQ_INVERTED
             else:
                 self._invertIQ = SX126X_LORA_IQ_STANDARD
-                
-            state = self.setPacketParams(self._preambleLength, self._crcType, self._implicitLen, self._headerType, self._invertIQ)
+            state = self.setPacketParams(self._preambleLength, self._crcType,
+                                         self._implicitLen, self._headerType, self._invertIQ)
         elif modem == SX126X_PACKET_TYPE_GFSK:
-            state = self.setPacketParamsFSK(self._preambleLengthFSK, self._crcTypeFSK, self._syncWordLength, self._addrComp, self._whitening, self._packetType, self._packetLength, self._preambleDetectorLength)
+            state = self.setPacketParamsFSK(self._preambleLengthFSK, self._crcTypeFSK,
+                                            self._syncWordLength, self._addrComp,
+                                            self._whitening, self._packetType,
+                                            self._packetLength, self._preambleDetectorLength)
         else:
-            return ERR_UNKNOWN
-        ASSERT(state)
-        
-        state = self.startReceiveCommon()
-        ASSERT(state)
-        
-        state = self.setRx(timeout)
-        
-        return state
+            state = ERR_UNKNOWN
+        try:
+            self.startReceiveCommon()
+        except Exception:
+            pass
+        rx = self.setRx(timeout)
+        return rx if (state == ERR_UNKNOWN or rx != ERR_NONE) else state
             
     def startReceiveDutyCycle(self, rxPeriod, sleepPeriod):
         transitionTime = int(self._tcxoDelay + 1000)

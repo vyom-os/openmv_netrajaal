@@ -27,7 +27,7 @@ from config import (
     VERSION,
     get_version_str
 )
-from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes, get_uptime_seconds
+from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes, get_uptime_seconds, build_dummy_heartbeat_payload
 from sx1262 import SX1262
 from gps_driver import GPSDriver
 from internet_driver import InternetDriver, UART_HEALTH_INTERVAL_SEC, SIM_UNDETECTED_INTERVAL_SEC, FAILED_RE_CONFIGURE_INTERVAL_SEC, FAILED_INTERNET_RETRY_INTERVAL_SEC_CC, FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT, SUCCESS_INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
@@ -48,7 +48,6 @@ INSTALL_MODE_WAIT_TIME = 60
 app_controller = None
 app_handler = None
 APP_DEBUGGING = False
-SAVE_LOGS = False
 
 DECRYPT_IMAGE_ON_HOPS = False
 if not PRODUCTION_MODE:
@@ -371,21 +370,6 @@ def running_as_cc():
 def running_as_unit():
     return not running_as_cc()
 
-async def logger_state():
-    global db_store
-    fileiter = 0
-    while True:
-        if trans_in_progress:
-            await asyncio.sleep(5)
-            continue
-        await asyncio.sleep(60)
-        fileiter += 1
-        log_file = f"{LOGS_DIR}/logs_{fileiter}.txt"
-        logs_list = logger.return_saved_logs_and_clear()
-        logger.info(f"Saving logs file {log_file} with {len(logs_list)} entries")
-        logs_data = ("\n".join(logs_list)).encode()
-        await db_store.save_file(logs_data, log_file) # file system success counted inside
-
 async def reboot_device():
     global db_store
     try:
@@ -496,6 +480,7 @@ def parse_header(databytes):
             # CRC_CHECKSUM: verify CRC of payload against the 4 bytes in header
             crc_checksum = databytes[MSG_UID_LEN:HEADER_LEN]
             if len(crc_checksum) != CRC_CHECKSUM_LEN:
+                # TODO this condition should not occur
                 radio_recd_err_count += 1
                 logger.error(f"[RECV] invalid header CRC_CHECKSUM length in {databytes}")
                 return (False, None, None, None, None, None, None)
@@ -511,6 +496,7 @@ def parse_header(databytes):
     except Exception as e:
         radio_recd_err_count += 1
         logger.error(f"[RECV] error parsing header: {databytes[:HEADER_LEN]} : {e}")
+        sys.print_exception(e)
         return (False, None, None, None, None, None, None)
 
 def ellepsis(msg):
@@ -694,7 +680,7 @@ def update_restmode_lock():
         restmode_last_actvity_time = get_epoch_ms()
 
 async def keep_restmode_lock():
-    # Input: None; Output: None (sets trans_in_progress flag with auto release after timeout / inactivity)
+    # Input: None; Output: None (sets restmode_in_progress flag with auto release after timeout / inactivity)
     global restmode_in_progress
     global restmode_last_actvity_time
 
@@ -705,33 +691,51 @@ async def keep_restmode_lock():
     if restmode_last_actvity_time is None:
         restmode_last_actvity_time = start_ms
 
-    while True:
-        await asyncio.sleep(5)
-        if not restmode_in_progress:
-            logger.debug(
-                f"[IMG] ○○○○○○○○○○❯❯ RESTMODE already ended ❮❮○○○○○○○○○○"
-            )
-            break
+    try:
+        while True:
+            await asyncio.sleep(5)
+            if not restmode_in_progress:
+                logger.debug(
+                    f"[IMG] ○○○○○○○○○○❯❯ RESTMODE already ended ❮❮○○○○○○○○○○"
+                )
+                break
 
-        now_ms = get_epoch_ms()
-        timeout_expired = (now_ms - start_ms) >= RESTMODE_LOCK_TIMEOUT * 1000
-        inactivity_expired = (now_ms - restmode_last_actvity_time) >= RESTMODE_INACTIVITY_LIMIT * 1000
-        if timeout_expired or inactivity_expired:
-            reason = []
-            if timeout_expired:
-                reason.append("MAX_TIMEOUT")
-            if inactivity_expired:
-                reason.append("INACTIVITY_TIMEOUT")
-            reason_str = "&".join(reason)
+            now_ms = get_epoch_ms()
+            timeout_expired = (now_ms - start_ms) >= RESTMODE_LOCK_TIMEOUT * 1000
+            inactivity_expired = (now_ms - restmode_last_actvity_time) >= RESTMODE_INACTIVITY_LIMIT * 1000
+            if timeout_expired or inactivity_expired:
+                reason = []
+                if timeout_expired:
+                    reason.append("MAX_TIMEOUT")
+                if inactivity_expired:
+                    reason.append("INACTIVITY_TIMEOUT")
+                reason_str = "&".join(reason)
 
-            logger.warning(
-                f"[IMG] ●●●●●●●●●●❯❯ RESTMODE ended, by {reason_str} ❮❮●●●●●●●●●●"
-            )
+                logger.warning(
+                    f"[IMG] ●●●●●●●●●●❯❯ RESTMODE ended, by {reason_str} ❮❮●●●●●●●●●●"
+                )
 
-            restmode_in_progress = False
-            restmode_last_actvity_time = None
-            break
-        
+                delete_restmode_lock()
+                break
+    except Exception as e:
+        logger.error(
+            f"[IMG] REST MODE loop error, error={e}"
+        )
+    finally:
+        # Close only if rest mode is still active (error, timeout, or unexpected exit)
+        if restmode_in_progress:
+            delete_restmode_lock()
+
+def delete_restmode_lock():
+    # Input: None; Output: None (clears restmode_in_progress flag)
+    global restmode_in_progress, restmode_last_actvity_time
+    if restmode_in_progress:
+        logger.info(f"[IMG] ●●●●●●●●●●❯❯ REST MODE ended by logic ❮❮●●●●●●●●●●")
+        restmode_in_progress = False
+        restmode_last_actvity_time = None
+    else:
+        logger.debug(f"[IMG] ○○○○○○○○○○❯❯ REST MODE already ended ❮❮○○○○○○○○○○")
+
 def is_restmode_inprogress():
     global restmode_in_progress
     return restmode_in_progress
@@ -779,7 +783,6 @@ def snapshot_radio_health_window():
     radio_fail_count_prev = (
         radio_sent_fail_count
         + radio_recd_err_count
-        + radio_recd_crcerr_count
         + radio_recd_hasherr_count
     )
 
@@ -927,6 +930,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
         except Exception as e:
             radio_recd_err_count += 1
             logger.error(f"[LORA] Error reading packet in interrupt callback: {e}")
+            sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
                 loranode.startReceive()
@@ -940,13 +944,16 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             loranode.clearIrqStatus(SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR)
             loranode.startReceive()
         except Exception as e:
-            radio_recd_err_count += 1
             logger.error(f"[LORA] Error handling CRC/Header error in interrupt callback: {e}")
+            sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
                 loranode.startReceive()
             except Exception as e:
                 logger.error(f"[LORA] Error clearing interrupt status: {e}")
+    elif events & ERR_UNKNOWN:
+        radio_recd_err_count += 10  # to make reset faster
+        logger.error("[LORA] Unknown error, dropping packet")
     elif events & SX126X_IRQ_TIMEOUT:
         # Radio left RX/TX because a finite timeout expired. Restart listening.
         # Not a receive error — do not count against radio_recd_err_count.
@@ -976,7 +983,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
 
 async def lora_health_monitor():  # is_lora_ready is not being used
     global loranode, lora_init_in_progress
-    global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_crcerr_count, radio_recd_hasherr_count
+    global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_hasherr_count
     global radio_succ_count_prev, radio_fail_count_prev
     RADIO_HEALTH_INTERVAL = 120
     while True:
@@ -1003,7 +1010,6 @@ async def lora_health_monitor():  # is_lora_ready is not being used
             radio_fail_count = (
                 radio_sent_fail_count
                 + radio_recd_err_count
-                + radio_recd_crcerr_count
                 + radio_recd_hasherr_count
             )
 
@@ -1714,7 +1720,7 @@ def recompile_msg(filedata_id):
 # Note only sends as many as wouldnt go beyond frame size
 # Assumption is that subsequent end chunks would get the rest
 def end_chunk(msg):
-    # is_all_chunk_arrived, missing_chunk_str, filedata_id, recompiled_msgbytes, epoch_ms
+    # transfer_completed, list_of_missing_chunk_id_bytes, filedata_id, recompiled_msgbytes, epoch_ms
     global trans_data_id, trans_prev_data_id, trans_chunks_count
     parts = msg.split(":")
     if len(parts) != 2:
@@ -1748,7 +1754,7 @@ def end_chunk(msg):
             return (True, b"", filedata_id, recompiled_msgbytes, epoch_ms)
         else:
             if filedata_id == trans_prev_data_id: # This has been proccessed before
-                logger.warning(f"[CHUNK] end_chunk: filedata_id={filedata_id} has been proccessed before, sending success...")
+                logger.info(f"[CHUNK] end_chunk: filedata_id={filedata_id} has been proccessed before, sending success...")
                 return (True, b"", filedata_id, None, epoch_ms)
             else:
                 logger.error(f"[CHUNK] Failed to recompile message for {filedata_id}")
@@ -2481,16 +2487,12 @@ def process_message(databytes, rssi=None, snr=None):
         free_before = get_free_memory()
         logger.info(f"[IMG RX] Free memory before End chunk: {free_before}KB")
         try:
-            alldone, missing_bytes, filedata_id, recompiled_msgbytes, epoch_ms = end_chunk(msgbytes.decode()) # TODO later, check how can we validate file
-        except UnicodeError as e:
-            logger.error(f"[IMG RX] Unicode decode error in End chunk: {e} : {msgbytes}")
-            sys.print_exception(e)
-            return False
+            transfer_completed, missing_bytes, filedata_id, recompiled_msgbytes, epoch_ms = end_chunk(msgbytes.decode()) # TODO later, check how can we validate file
         except Exception as e:
             logger.error(f"[IMG RX] Error in end_chunk for End chunk: {e}")
             sys.print_exception(e)
             return False
-        if alldone:
+        if transfer_completed:
             if recompiled_msgbytes:
                 try:
                     computed_md5 = ubinascii.hexlify(hashlib.md5(recompiled_msgbytes).digest()).decode()
@@ -2660,62 +2662,67 @@ def build_heartbeat_payload():  # HARD limit is 50 bytes
     Total size: 44 bytes (hard limit 50).
     """
     global img_capture_count, db_store, internet_module, PROCESS_ID_STR
-    global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_crcerr_count, radio_recd_hasherr_count
+    global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_hasherr_count
 
-    radio_succ_count = radio_sent_succ_count + radio_recd_succ_count
-    radio_fail_count = radio_sent_fail_count + radio_recd_err_count + radio_recd_crcerr_count + radio_recd_hasherr_count
+    try:
+        radio_succ_count = radio_sent_succ_count + radio_recd_succ_count
+        radio_fail_count = radio_sent_fail_count + radio_recd_err_count + radio_recd_hasherr_count
 
-    signal_strength = 0
-    network_type = 0 # 1 byte data
-    is_cc_unit = 0 # 1 byte data
-    free_memory = get_free_memory() # 2 bytes data
-    device_uptime = get_uptime_minutes() # 2 bytes data, in minutes, max value 43200 got 30 days
+        signal_strength = 0
+        network_type = 0 # 1 byte data
+        is_cc_unit = 0 # 1 byte data
+        free_memory = get_free_memory() # 2 bytes data
+        device_uptime = get_uptime_minutes() # 2 bytes data, in minutes, max value 43200 got 30 days
 
-    if internet_module:
-        signal_strength = internet_module.get_last_signal_strength() or 0
-        network_type = internet_module.get_last_network_type() or 0
+        if internet_module:
+            signal_strength = internet_module.get_last_signal_strength() or 0
+            network_type = internet_module.get_last_network_type() or 0
 
-    if running_as_cc():
-        is_cc_unit = 1
+        if running_as_cc():
+            is_cc_unit = 1
 
-    hbmsg_bytes = b""
-    hbmsg_bytes += int_to_nbytes(img_capture_count, 2)
-    hbmsg_bytes += int_to_nbytes(db_store.get_img_sent_count(), 2)
-    hbmsg_bytes += int_to_nbytes(db_store.get_img_dropped_count(), 2)
-    hbmsg_bytes += int_to_nbytes(db_store.get_img_failed_count(), 2)
-    hbmsg_bytes += int_to_nbytes(db_store.get_img_queued_count(), 2)
+        hbmsg_bytes = b""
+        hbmsg_bytes += int_to_nbytes(img_capture_count, 2)
+        hbmsg_bytes += int_to_nbytes(db_store.get_img_sent_count(), 2)
+        hbmsg_bytes += int_to_nbytes(db_store.get_img_dropped_count(), 2)
+        hbmsg_bytes += int_to_nbytes(db_store.get_img_failed_count(), 2)
+        hbmsg_bytes += int_to_nbytes(db_store.get_img_queued_count(), 2)
 
-    hbmsg_bytes += int_to_nbytes(radio_succ_count, 3)
-    hbmsg_bytes += int_to_nbytes(radio_fail_count, 3)
-    if internet_module and internet_module.configured:
-        hbmsg_bytes += int_to_nbytes(internet_module.get_upload_success_count(), 3)
-        hbmsg_bytes += int_to_nbytes(internet_module.get_upload_fail_count(), 3)
-    else:
-        hbmsg_bytes += int_to_nbytes(0, 3)
-        hbmsg_bytes += int_to_nbytes(0, 3)
-    hbmsg_bytes += int_to_nbytes(db_store.get_fs_succ_count(), 2)
-    hbmsg_bytes += int_to_nbytes(db_store.get_fs_err_count(), 2)
-    # 3 neighbours and 3 node from sortest path
-    neighbours = get_curr_neighbours() or []
-    for i in range(3):
-        node_id = neighbours[i] if i < len(neighbours) else 0
-        hbmsg_bytes += int_to_nbytes(node_id, 1)
+        hbmsg_bytes += int_to_nbytes(radio_succ_count, 3)
+        hbmsg_bytes += int_to_nbytes(radio_fail_count, 3)
+        if internet_module and internet_module.configured:
+            hbmsg_bytes += int_to_nbytes(internet_module.get_upload_success_count(), 3)
+            hbmsg_bytes += int_to_nbytes(internet_module.get_upload_fail_count(), 3)
+        else:
+            hbmsg_bytes += int_to_nbytes(0, 3)
+            hbmsg_bytes += int_to_nbytes(0, 3)
+        hbmsg_bytes += int_to_nbytes(db_store.get_fs_succ_count(), 2)
+        hbmsg_bytes += int_to_nbytes(db_store.get_fs_err_count(), 2)
+        # 3 neighbours and 3 node from sortest path
+        neighbours = get_curr_neighbours() or []
+        for i in range(3):
+            node_id = neighbours[i] if i < len(neighbours) else 0
+            hbmsg_bytes += int_to_nbytes(node_id, 1)
 
-    shortest_path = get_curr_spath() or []
-    for i in range(3):
-        node_id = shortest_path[i] if i < len(shortest_path) else 0
-        hbmsg_bytes += int_to_nbytes(node_id, 1)
-    # Process ID
-    proc_id = (PROCESS_ID_STR or "")[:3]
-    proc_id = proc_id + ("_" * (3 - len(proc_id)))
-    hbmsg_bytes += proc_id.encode()
-    hbmsg_bytes += int_to_nbytes(VERSION, 2)
-    hbmsg_bytes += int_to_nbytes(signal_strength, 1)
-    hbmsg_bytes += int_to_nbytes(network_type, 1)
-    hbmsg_bytes += int_to_nbytes(is_cc_unit, 1)
-    hbmsg_bytes += int_to_nbytes(free_memory, 2)
-    hbmsg_bytes += int_to_nbytes(device_uptime, 2)
-    return hbmsg_bytes
+        shortest_path = get_curr_spath() or []
+        for i in range(3):
+            node_id = shortest_path[i] if i < len(shortest_path) else 0
+            hbmsg_bytes += int_to_nbytes(node_id, 1)
+        # Process ID
+        proc_id = (PROCESS_ID_STR or "")[:3]
+        proc_id = proc_id + ("_" * (3 - len(proc_id)))
+        hbmsg_bytes += proc_id.encode()
+        hbmsg_bytes += int_to_nbytes(VERSION, 2)
+        hbmsg_bytes += int_to_nbytes(signal_strength, 1)
+        hbmsg_bytes += int_to_nbytes(network_type, 1)
+        hbmsg_bytes += int_to_nbytes(is_cc_unit, 1)
+        hbmsg_bytes += int_to_nbytes(free_memory, 2)
+        hbmsg_bytes += int_to_nbytes(device_uptime, 2)
+        return hbmsg_bytes
+    except Exception as e:
+        logger.error(f"[HB] Failed to build heartbeat payload: {e}")
+        sys.print_exception(e)
+        return build_dummy_heartbeat_payload(VERSION)
 
 async def send_heartbeat():
     # Input: None; Output: bool indicating whether heartbeat was successfully sent to a neighbour
@@ -3438,8 +3445,8 @@ async def main():
     asyncio.create_task(lora_health_monitor())
 
     asyncio.create_task(radio_read())
-    asyncio.create_task(process_packet_queue())  # Process queued packets asynchronously
-    asyncio.create_task(keep_updating_gps())
+    asyncio.create_task(process_packet_queue())
+    asyncio.create_task(keep_updating_gps())  # don't move this keep running function
     await asyncio.sleep(1)
     asyncio.create_task(network_request_loop())
     asyncio.create_task(keep_generating_heartbeat())
@@ -3453,9 +3460,6 @@ async def main():
 
     # POWER SAVE (machine.idle when safe) =====>
     asyncio.create_task(power_save_loop())
-
-    if SAVE_LOGS:
-        asyncio.create_task(logger_state())
 
     for i in range(24*7*8):  # total 8 weeks runtime
         await asyncio.sleep(3600)
