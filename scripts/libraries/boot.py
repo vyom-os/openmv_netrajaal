@@ -952,9 +952,9 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
                 loranode.startReceive()
             except Exception as e:
                 logger.error(f"[LORA] Error clearing interrupt status: {e}")
-    elif events & ERR_UNKNOWN:
-        radio_recd_err_count += 10  # to make reset faster
-        logger.error("[LORA] Unknown error, dropping packet")
+    # elif events & ERR_UNKNOWN:
+    #     radio_recd_err_count += 10  # to make reset faster
+    #     logger.error("[LORA] Unknown error, dropping packet")
     elif events & SX126X_IRQ_TIMEOUT:
         # Radio left RX/TX because a finite timeout expired. Restart listening.
         # Not a receive error — do not count against radio_recd_err_count.
