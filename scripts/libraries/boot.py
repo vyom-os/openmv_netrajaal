@@ -73,7 +73,7 @@ db_store = None
 img_capture_count = 0 # Counter to keep track of saved images
 img_file_counter = 0
 
-ack_msgs_recd = [] # USED only to check ack of sent messages
+ack_msgs_recd = [] # (msg_uid, msgbytes, t, radio_signal_2); radio_signal_2 = local RSSI strength of received ACK
 MAX_ACK_MSGS_RECD = 500          # Maximum messages in received buffer
 MAX_AGE_MSG_RCD_SEC = 20   # 20 sec, after 20 sec messages will be removed
 # Chunk slots in CHUNK_STORAGE_BUFFER; block[0]=len (0=empty), block[1:]=payload
@@ -112,6 +112,7 @@ HEADER_JOINED_LEN = HEADER_LEN + 1 # 1 byte for ; separator, total 12 bytes for 
 IMG_ID_LEN = 3 # UXK, BTQ
 IMG_ID_BYTES = 2
 CHUNK_ID_BYTES = 2
+RADIO_SIGNAL_BYTES = 1  # LoRa RSSI as 0-100, packed into every ACK after msg_uid
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
 
@@ -1209,7 +1210,7 @@ def cleanup_old_ack_messages():
     # PART 1 - delete the exipred
     old_list = ack_msgs_recd
 
-    ack_msgs_recd = [(msg_uid, msg, t) for msg_uid, msg, t in ack_msgs_recd
+    ack_msgs_recd = [(msg_uid, msg, t, radio_signal_2) for msg_uid, msg, t, radio_signal_2 in ack_msgs_recd
                  if (current_time - t) < age_threshold_ms]
 
     old_list.clear()
@@ -1298,7 +1299,8 @@ def radio_send(dest, data, msg_uid):
 async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
     global radio_sent_succ_count, radio_sent_fail_count
     try:
-        # Input: msg_typ: str, creator: int, msgbytes: bytes, dest: int; Output: tuple(success: bool, missing_chunks: list)
+        # Input: msg_typ: str, creator: int, msgbytes: bytes, dest: int
+        # Output: tuple(success: bool, radio_signal_1: int|None, radio_signal_2: int|None, missing_chunks: list)
         msg_uid, crc_checksum = get_msg_header(msg_typ, creator, dest, msgbytes)
         payload_bytes = msg_uid + crc_checksum + b";" + msgbytes # HEADER + CRC + SEPARATOR + BODY (HEADER_JOINED_LEN + PACKET_BODY_LIMIT)
         ackneeded = ack_needed(msg_typ)
@@ -1311,12 +1313,12 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
             if not succ:
                 radio_sent_fail_count += 1
                 logger.error(f"[LORA] Error sending message: {err}, MSG_UID = {msg_uid}")
-                return (False, [])
+                return (False, None, None, [])
             # Do not increment radio_sent_succ_count: PHY ERR_NONE does not prove it
             await asyncio.sleep(MIN_SLEEP)
             if msg_typ != "I":
                 logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {payload_bytes} bytes, MSG_UID = {msg_uid}")
-            return (True, [])
+            return (True, None, None, [])
 
         for retry_i in range(retry_count):
             succ, err = radio_send(dest, payload_bytes, msg_uid)
@@ -1329,11 +1331,11 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
             first_log_flag = True
             ack_msg_recheck_count = 3
             for i in range(ack_msg_recheck_count): # ack_msk recheck
-                ack_recd_time, missing_chunks = get_ack_msg_info(msg_uid)
+                ack_recd_time, radio_signal_1, radio_signal_2, missing_chunks = get_ack_msg_info(msg_uid)
                 if ack_recd_time > 0:
-                    logger.info(f"[ACK] Msg {msg_uid} : was acked in {ack_recd_time - sent_time} msecs")
+                    logger.info(f"[ACK] Msg {msg_uid} : was acked in {ack_recd_time - sent_time} msecs, radio_signal_1={radio_signal_1}, radio_signal_2={radio_signal_2}")
                     radio_sent_succ_count += 1
-                    return (True, missing_chunks)
+                    return (True, radio_signal_1, radio_signal_2, missing_chunks)
                 else:
                     if first_log_flag:
                         logger.info(f"[ACK] Still waiting for ack, MSG_UID =  {msg_uid} # {i}")
@@ -1346,11 +1348,11 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
             logger.warning(f"[ACK] Failed to get ack, MSG_UID = {msg_uid}, retry # {retry_i+1}/{retry_count}")
         logger.error(f"[LORA] Failed to send message, MSG_UID = {msg_uid}")
         radio_sent_fail_count += 1
-        return (False, [])
+        return (False, None, None, [])
     except Exception as e:
         logger.fatal(f"[LORA] Exception in send_single_packet: {e}")
         radio_sent_fail_count += 1
-        return (False, [])
+        return (False, None, None, [])
 
 def make_chunks(msgbytes):
     # Input: msgbytes: bytes; Output: list of bytes chunks up to 200 bytes each (safe size for 255 byte LoRa limit)
@@ -1400,18 +1402,19 @@ def is_hybrid_encrypted(msg_typ):
 async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messages except file data
     try:
         if not is_lora_ready():
-            return False
-        # Input: msg_typ: str, creator: int, msgbytes: bytes, dest: int; Output: bool success indicator
+            return False, None, None
+        # Input: msg_typ: str, creator: int, msgbytes: bytes, dest: int
+        # Output: tuple(success: bool, radio_signal_1: int|None, radio_signal_2: int|None)
         if len(msgbytes) <= PACKET_BODY_LIMIT:
             logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, len:{len(msgbytes)} bytes, single packet")
-            succ, _ = await send_single_packet(msg_typ, creator, msgbytes, dest, retry_count)
-            return succ
+            succ, radio_signal_1, radio_signal_2, _ = await send_single_packet(msg_typ, creator, msgbytes, dest, retry_count)
+            return succ, radio_signal_1, radio_signal_2
         else:
             logger.error(f"msgbtyes size exceeds the payload body limit, {len(msgbytes)} bytes > {PACKET_BODY_LIMIT} bytes")
-            return False
+            return False, None, None
     except Exception as e:
         logger.error(f"[LORA] Exception in send_msg: {e}")
-        return False
+        return False, None, None
 
 async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
     if not is_lora_ready():
@@ -1424,7 +1427,7 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
             # sending start
             chunks = make_chunks(msgbytes)
             logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, len:{len(msgbytes)} bytes, filedata_id:{filedata_id}, image_payload in {len(chunks)} chunks")
-            big_succ, _ = await send_single_packet("B", creator, f"{filedata_id}:{msg_typ}:{len(chunks)}:{md5}", dest)
+            big_succ, _, _, _ = await send_single_packet("B", creator, f"{filedata_id}:{msg_typ}:{len(chunks)}:{md5}", dest)
             if not big_succ:
                 # logger.info(f"[CHUNK] Failed sending chunk begin")
                 delete_transmode_lock(dest, filedata_id)
@@ -1439,7 +1442,7 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
                     await asyncio.sleep(CHUNK_SLEEP)
                     # Adding meta data to chunk bytes, 3 + 2 + 45 = 50 bytes max
                     chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                    _ = await send_single_packet("I", creator, chunkbytes, dest)
+                    _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
                     if(chunk_id+1) % CHUNK_BURST_SIZE == 0:
                         logger.info(f"[CHUNK] pause {CHUNK_BURST_RX_SLEEP}s after {chunk_id+1} chunks for RX")
                         await asyncio.sleep(CHUNK_BURST_RX_SLEEP)
@@ -1452,7 +1455,7 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
                     await asyncio.sleep(0.1)  # Faster first check
                 else:
                     await asyncio.sleep(CHUNK_SLEEP)
-                succ, missing_chunks = await send_single_packet("E", creator, f"{filedata_id}:{epoch_ms}", dest, retry_count = 5)
+                succ, _, _, missing_chunks = await send_single_packet("E", creator, f"{filedata_id}:{epoch_ms}", dest, retry_count = 5)
                 if not succ:
                     # logger.error(f"[CHUNK] Failed sending chunk end")
                     return False, "Failed sending chunk end"
@@ -1480,7 +1483,7 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
                                 logger.info(f"⋙ Sending missing chunks to {dest}, ({idx}-{min(idx+10, len(missing_chunks))})/{len(missing_chunks)}...")
                             await asyncio.sleep(CHUNK_SLEEP)
                             chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                            _ = await send_single_packet("I", creator, chunkbytes, dest)
+                            _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
                     else:
                         # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
                         return False, "TRANS MODE ended, timeout error"
@@ -1496,34 +1499,37 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
 
 def get_ack_msg_info(msg_uid):
     global ack_msgs_recd, MSG_UID_LEN
-    # Input: msg_uid: bytes; Output: tuple(ack_recd_time:int, missingids:list or None)
-    for (recd_msg_uid, msgbytes, t) in ack_msgs_recd:
-        # msgbytes of ack message is msg_uid only (+ missing_chunks string?)
-        if len(msgbytes) >= MSG_UID_LEN:
+    # ACK payload: msg_uid + radio_signal_1 (1 byte, 0-100) [+ b":" + missing chunk ids]
+    # radio_signal_1: remote RSSI of our sent packet (packed in ACK body)
+    # radio_signal_2: local RSSI of the received ACK (4th field in ack_msgs_recd)
+    # Output: tuple(ack_recd_time:int, radio_signal_1:int|None, radio_signal_2:int|None, missingids:list)
+    for (recd_msg_uid, msgbytes, t, radio_signal_2) in ack_msgs_recd:
+        if len(msgbytes) >= MSG_UID_LEN + RADIO_SIGNAL_BYTES:
             ack_msg_uid = msgbytes[:MSG_UID_LEN]
             if msg_uid == ack_msg_uid:
+                radio_signal_1 = msgbytes[MSG_UID_LEN]
                 missingids = []
-                # case for missing chunks
-                if len(msgbytes) >= MSG_UID_LEN + 1 and msgbytes[MSG_UID_LEN:MSG_UID_LEN+1] == b':': # This will always we true
-                    payload = msgbytes[MSG_UID_LEN+1:]
+                colon_pos = MSG_UID_LEN + RADIO_SIGNAL_BYTES
+                if len(msgbytes) > colon_pos and msgbytes[colon_pos:colon_pos+1] == b':':
+                    payload = msgbytes[colon_pos+1:]
                     if payload:
                         try:
                             if len(payload) % CHUNK_ID_BYTES != 0:
                                 logger.error(
                                     f"[ACK] Missing IDs payload length {len(payload)} not multiple of CHUNK_ID_BYTES={CHUNK_ID_BYTES}, ignoring payload"
                                 )
-                                return (0, []) # ignoring invalid payload
+                                return (0, None, None, []) # ignoring invalid payload
                             for i in range(0, len(payload), CHUNK_ID_BYTES):
                                 chunk_id = int.from_bytes(payload[i:i+CHUNK_ID_BYTES], "big")
                                 missingids.append(chunk_id)
                         except Exception as e: # failed to parse payload
                             logger.warning(f"[ACK] Failed to parse missing IDs payload {payload}: {e}")
-                            return (0, [])
-                logger.debug(f"[ACK] Matched ACK for {msg_uid}, missing chunks: {missingids}")
-                return (t, missingids)
+                            return (0, None, None, [])
+                logger.debug(f"[ACK] Matched ACK for {msg_uid}, radio_signal_1={radio_signal_1}, radio_signal_2={radio_signal_2}, missing chunks: {missingids}")
+                return (t, radio_signal_1, radio_signal_2, missingids)
         else:
-            logger.debug(f"[ACK] ACK payload too short: {len(msgbytes)} bytes, expected at least {HEADER_LEN-1}")
-    return (0, [])
+            logger.debug(f"[ACK] ACK payload too short: {len(msgbytes)} bytes, expected at least {MSG_UID_LEN + RADIO_SIGNAL_BYTES}")
+    return (0, None, None, [])
 
 
 
@@ -1737,8 +1743,8 @@ def end_chunk(msg):
     missing_chunks = get_missing_chunks(filedata_id)
     if len(missing_chunks) > 0:
         logger.info(f"[CHUNK] I am missing {len(missing_chunks)}/{trans_chunks_count} chunks: first 20 = {missing_chunks[:20]}")
-        # Reserve space for msg_uid + ":" + safety; pack missing IDs as fixed-width bytes
-        max_missing_bytes = PACKET_PAYLOAD_LIMIT - HEADER_JOINED_LEN - MSG_UID_LEN - 1
+        # Reserve space for msg_uid + radio_signal + ":" ; pack missing IDs as fixed-width bytes
+        max_missing_bytes = PACKET_PAYLOAD_LIMIT - HEADER_JOINED_LEN - MSG_UID_LEN - RADIO_SIGNAL_BYTES - 1
         missing_bytes = bytearray()
         for idx, chunk_id in enumerate(missing_chunks):
             chunk_bytes = chunk_id.to_bytes(CHUNK_ID_BYTES, "big")
@@ -2043,7 +2049,7 @@ async def hb_process(msg_uid, msgbytes, sender):
         if next_dst:
             sent_succ = False
             logger.info(f"[HB] Propogating H to {next_dst}")
-            sent_succ = await send_msg("H", creator, msgbytes, next_dst)
+            sent_succ, radio_signal_1, radio_signal_2 = await send_msg("H", creator, msgbytes, next_dst)
             if not sent_succ:
                 logger.error(f"[HB] forwarding HB to {next_dst} failed")
         else:
@@ -2392,6 +2398,33 @@ async def image_sending_loop():
         if db_store.get_img_queued_count() > 0:
             await asyncio.sleep(random.uniform(IMAGE_SENDING_FAILED_PAUSE, IMAGE_SENDING_FAILED_PAUSE_2))
 
+def _rssi_to_pct(rssi):  # LoRa packet RSSI: 0 dBm (best) to -150 dBm (worst)
+    if rssi is None:
+        return 0
+    try:
+        rssi = float(rssi)
+    except (TypeError, ValueError):
+        return 0
+
+    # SX126x packet RSSI typically 0 to -150 dBm
+    if rssi > 0 or rssi < -150:
+        return 0
+
+    # Piecewise display mapping (dBm → %):
+    #   -150 → 0%   unusable
+    #    -90 → 25%  poor
+    #    -60 → 45%  weak / average
+    #    -30 → 85%  great
+    #      0 → 100% excellent
+    points = ((-150, 0), (-90, 25), (-60, 45), (-30, 85), (0, 100))
+    for i in range(1, len(points)):
+        r0, p0 = points[i - 1]
+        r1, p1 = points[i]
+        if rssi <= r1:
+            t = (rssi - r0) / float(r1 - r0)
+            return int(round(p0 + t * (p1 - p0)))
+    return 100
+
 def process_message(databytes, rssi=None, snr=None):
     # Input: databytes: bytes raw LoRa payload; rssi/snr: RF quality after recv; Output: bool indicating if message was processed
     global is_install_mode, db_store
@@ -2427,7 +2460,8 @@ def process_message(databytes, rssi=None, snr=None):
         logger.info(f"[{recv_log} from {sender}{rf_log}] [{'*' * data_masked_log}] {len(databytes)} bytes, MSG_UID = {msg_uid}")
 
     # logger.info(f"[PARSED HEADER] msg_uid:{msg_uid}, msg_typ:{msg_typ}, creator:{creator}, sender:{sender}, receiver:{receiver}, len-msgbytes:{len(msgbytes)}")
-    ackmessage = msg_uid
+    radio_signal = _rssi_to_pct(rssi)
+    ackmessage = msg_uid + int_to_nbytes(radio_signal, RADIO_SIGNAL_BYTES)
     if msg_typ == "H":
         asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
         # Validate heartbeat message payload length for encrypted messages
@@ -2626,7 +2660,7 @@ def process_message(databytes, rssi=None, snr=None):
             logger.error(f"[APP] unknown command: {msgstr}")
 
     elif msg_typ == "A":
-        ack_msgs_recd.append((msg_uid, msgbytes, get_ms_diff())) # storing only ack, of every message, like ack of B, E...
+        ack_msgs_recd.append((msg_uid, msgbytes, get_ms_diff(), radio_signal)) # radio_signal_2 = local RSSI of this ACK
         logger.debug(f"[ACK] Received ACK message: {msg_uid}, payload: {msgbytes}")
     elif msg_typ == "D":
         logger.info(f"[DBG] Received DEBUG message, msg={msgbytes}, ignoring...")
@@ -2750,9 +2784,9 @@ async def send_heartbeat():
     else:
         next_dst = next_device_in_spath()
         if next_dst:
-            sent_succ = await send_msg("H", my_addr, msgbytes, next_dst)
+            sent_succ, radio_signal_1, radio_signal_2 = await send_msg("H", my_addr, msgbytes, next_dst)
             if sent_succ:
-                logger.info(f"[HB] Heartbeat sent successfully to {next_dst}")
+                logger.info(f"[HB] Heartbeat sent successfully to {next_dst}, s1={radio_signal_1}, s2={radio_signal_2}")
                 return True
         else:
             logger.error(f"[HB] can't send HB because I dont have next device in spath yet")
@@ -2823,7 +2857,7 @@ async def send_debugmsg():
         return False
 
     # Fire-and-forget debug stream: broadcast without expecting ACK.
-    sent_succ = await send_msg("D", my_addr, msgbytes, 65535)
+    sent_succ, radio_signal_1, radio_signal_2 = await send_msg("D", my_addr, msgbytes, 65535)
     if sent_succ:
         logger.info(f"[DBG] Debug message broadcasted, len={len(msgbytes)}")
         return True
@@ -3130,15 +3164,15 @@ class AppHandler:
         payload_bytes = bytes(byte_count) if byte_count > 0 else b""
         monitor_from = get_epoch_ms()
         for i in range(TEST_MESSAGE_COUNT):
-            succ = await send_msg("Z", my_addr, payload_bytes, target_addr, 1)
+            succ, radio_signal_1, radio_signal_2 = await send_msg("Z", my_addr, payload_bytes, target_addr, 1)
             if succ:
                 success_count += 1
                 success_msg_elapsed_ms += get_epoch_ms() - monitor_from
-                logger.info(f"{my_addr} Successfully sent connectivity check message to {target_addr} (attempt {i+1}/{TEST_MESSAGE_COUNT})")
+                logger.info(f"{my_addr} Successfully sent connectivity check message to {target_addr}, s1={radio_signal_1}, s2={radio_signal_2} (attempt {i+1}/{TEST_MESSAGE_COUNT})")
             else:
                 logger.info(f"{my_addr} Failed to send connectivity check message to {target_addr} (attempt {i+1}/{TEST_MESSAGE_COUNT})")
 
-            app_controller.create_and_send_message("radio_check", {"target_addr": target_addr, "attempt": i+1, "total_attempts": TEST_MESSAGE_COUNT,"result": "pass" if succ else "fail"}, timeout=0.5)
+            app_controller.create_and_send_message("radio_check", {"target_addr": target_addr, "attempt": i+1, "total_attempts": TEST_MESSAGE_COUNT,"result": "pass" if succ else "fail", "s1": radio_signal_1, "s2": radio_signal_2}, timeout=0.5)
 
             monitor_from = get_epoch_ms()
 
