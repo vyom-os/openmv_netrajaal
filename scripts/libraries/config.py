@@ -210,10 +210,18 @@ def get_machine_uid():
     """Return unique machine UID"""
     return uid
 
-def get_my_addr():
+def get_my_addr():  # use get_machine_id instead
     saved_id = get_key_value('machine_id')
     if saved_id:
-        return int(saved_id)
+        if my_addr:
+            if int(saved_id) == my_addr:
+                return int(saved_id)
+            else:
+                set_key_value('machine_id', my_addr)
+                print(f"Error, id saved in flash: {saved_id}, not equal to config addr: {my_addr}, hence updated")
+                return my_addr
+        else:
+            return int(saved_id)
     elif my_addr:
         set_key_value('machine_id', my_addr)
         return my_addr
@@ -223,7 +231,15 @@ def get_my_addr():
 def get_machine_id():
     saved_id = get_key_value('machine_id')
     if saved_id:
-        return int(saved_id)
+        if my_addr:
+            if int(saved_id) == my_addr:
+                return int(saved_id)
+            else:
+                set_key_value('machine_id', my_addr)
+                print(f"Error, id saved in flash: {saved_id}, not equal to config addr: {my_addr}, hence updated")
+                return my_addr
+        else:
+            return int(saved_id)
     elif my_addr:
         set_key_value('machine_id', my_addr)
         return my_addr
