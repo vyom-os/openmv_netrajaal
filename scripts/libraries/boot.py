@@ -31,7 +31,7 @@ from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_up
 from sx1262 import SX1262
 from gps_driver import GPSDriver
 from internet_driver import InternetDriver, UART_HEALTH_INTERVAL_SEC, SIM_UNDETECTED_INTERVAL_SEC, FAILED_RE_CONFIGURE_INTERVAL_SEC, FAILED_INTERNET_RETRY_INTERVAL_SEC_CC, FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT, SUCCESS_INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
-from _sx126x import ERR_NONE, ERR_CRC_MISMATCH, ERR_UNKNOWN, SX126X_IRQ_CRC_ERR, SX126X_IRQ_HEADER_ERR, SX126X_IRQ_RX_DONE, SX126X_IRQ_TIMEOUT, SX126X_IRQ_TX_DONE, SX126X_SYNC_WORD_PRIVATE, SX126X_IRQ_ALL, SX126X_PACKET_TYPE_LORA
+from _sx126x import ERR_NONE, ERR_CRC_MISMATCH, ERR_UNKNOWN, SX126X_IRQ_CRC_ERR, SX126X_IRQ_HEADER_ERR, SX126X_IRQ_RX_DONE, SX126X_IRQ_TIMEOUT, SX126X_IRQ_TX_DONE, SX126X_IRQ_ALL, SX126X_PACKET_TYPE_LORA
 import detect
 from detect import PIR_PIN, turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
@@ -158,6 +158,8 @@ LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-80
 LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
 LORA_POWER = 22           # Maximum power for strong signal margin
 LORA_PREAMBLE = 10        # Longer preamble for better sync detection
+# Watchmen mesh sync word (not 0x12 hobby-default / not 0x34 LoRaWAN). Same on all devices.
+LORA_SYNC_WORD = 0x2B
 
 gps_module = None
 internet_module = None
@@ -222,6 +224,7 @@ radio_sent_succ_count = 0
 radio_sent_fail_count = 0
 LORA_CONTINUOUS_SENT_ERROR_LIMIT = 5
 lora_continuous_sent_error_count = 0
+lora_tx_done_fail = 0  # consecutive sends without TX_DONE
 # radio receive
 radio_recd_succ_count = 0
 radio_recd_err_count = 0
@@ -829,7 +832,7 @@ async def init_lora():
             bw=LORA_BW,
             sf=LORA_SF,
             cr=LORA_CR,
-            syncWord=SX126X_SYNC_WORD_PRIVATE,
+            syncWord=LORA_SYNC_WORD,
             power=LORA_POWER,
             currentLimit=140.0,
             preambleLength=LORA_PREAMBLE,
@@ -893,11 +896,13 @@ async def recover_lora(reason):
         if lora_last_recover_ms and (now - lora_last_recover_ms) < LORA_RESET_INTERVAL_SEC * 1000:
             logger.warning(f"[LORA] Reset already attempted within last {LORA_RESET_INTERVAL_SEC} seconds, skipping reset...")
             return False
+        global lora_tx_done_fail
         lora_last_recover_ms = now
         logger.fatal(f"[LORA] recovering radio: {reason}")
         reset_lora()
         succ = await init_lora()
         if succ:
+            lora_tx_done_fail = 0
             snapshot_radio_health_window()
         return succ
     except Exception as e:
@@ -915,6 +920,20 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
     """
     global lora_rx_data, lora_rx_status, lora_rx_event, lora_rx_rssi, lora_rx_snr
     global radio_recd_err_count, radio_recd_crcerr_count, radio_recd_skip_count
+    global lora_tx_done_fail
+
+    # CRC/header first: RX_DONE is often set together; skip buffer read on bad packets.
+    # ISR: count + clear IRQ + re-arm RX only. No SNR/SPI status reads here.
+    if events & (SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR):
+        radio_recd_crcerr_count += 1
+        try:
+            loranode.clearIrqStatus(
+                SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR | SX126X_IRQ_RX_DONE
+            )
+            loranode.startReceive()
+        except Exception:
+            pass
+        return
 
     if events & SX126X_IRQ_RX_DONE:
         try:
@@ -932,21 +951,6 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
         except Exception as e:
             radio_recd_err_count += 1
             logger.error(f"[LORA] Error reading packet in interrupt callback: {e}")
-            sys.print_exception(e)
-            try:
-                loranode.clearIrqStatus(SX126X_IRQ_ALL)
-                loranode.startReceive()
-            except Exception as e:
-                logger.error(f"[LORA] Error clearing interrupt status: {e}")
-    elif events & (SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR):
-        # RX_DONE is checked first, so this is CRC/header without a usable payload.
-        radio_recd_crcerr_count += 1
-        logger.error("[LORA] CRC/Header error, dropping packet")
-        try:
-            loranode.clearIrqStatus(SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR)
-            loranode.startReceive()
-        except Exception as e:
-            logger.error(f"[LORA] Error handling CRC/Header error in interrupt callback: {e}")
             sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
@@ -972,8 +976,8 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
                 logger.error(f"[LORA] Error clearing interrupt status: {e}")
     elif events & SX126X_IRQ_TX_DONE:
         # SX126x returns to standby after TX. _onIRQ already called startReceive(),
-        # which also cleared IRQ flags. Nothing further to do here.
-        pass
+        # which also cleared IRQ flags.
+        lora_tx_done_fail = 0
     else:
         logger.error(f"[LORA] Unknown interrupt event: {events}, resetting status, receive mode...")
         try:
@@ -1276,7 +1280,7 @@ async def periodic_health_stats_loop():
 
 def radio_send(dest, data, msg_uid):
     # Input: dest: int, data: bytes; Output: None (sends bytes via LoRa, logs send)
-    global lora_continuous_sent_error_count
+    global lora_continuous_sent_error_count, lora_tx_done_fail
     if len(data) > 254:
         return False, f"[LORA] msg too large : {len(data)}"
 
@@ -1291,9 +1295,10 @@ def radio_send(dest, data, msg_uid):
             lora_continuous_sent_error_count = 0
         return False, f"[LORA] Send failed with status: {status}"
     lora_continuous_sent_error_count = 0
-    # Map 0-210 bytes to 1-10 asterisks, anything above 210 = 10 asterisks
-    # data_masked_log = min(10, max(1, (len(data) + 20) // 21))
-    # logger.info(f"[⮕ SENT to {dest}] [{'*' * data_masked_log}] {len(data)} bytes, MSG_UID = {msg_uid}")
+    lora_tx_done_fail += 1
+    if lora_tx_done_fail >= 10:
+        asyncio.create_task(recover_lora(f"TX_DONE failed {lora_tx_done_fail} times in a row"))
+        lora_tx_done_fail = 0
     return True, None
 
 async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
