@@ -158,8 +158,8 @@ LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-80
 LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
 LORA_POWER = 22           # Maximum power for strong signal margin
 LORA_PREAMBLE = 10        # Longer preamble for better sync detection
-# Watchmen mesh sync word (not 0x12 hobby-default / not 0x34 LoRaWAN). Same on all devices.
-LORA_SYNC_WORD = 0x2B
+# LoRa hobby-default sync word (0x12). Use same value on all devices in the mesh.
+LORA_SYNC_WORD = 0x12
 
 gps_module = None
 internet_module = None
