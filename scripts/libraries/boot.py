@@ -2642,7 +2642,7 @@ def process_message(databytes, rssi=None, snr=None):
             logger.warning(f"[NET] X from {sender}, have invalid times, ignored")
         asyncio.create_task(network_response_generate(sender))
     elif msg_typ == "Y":
-        asyncio.create_task(network_response_consume(msgbytes , sender))
+        asyncio.create_task(network_response_consume(msgbytes , sender, rssi, snr))
     elif msg_typ == "Z":
         update_restmode_lock()
         asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
@@ -2883,12 +2883,20 @@ async def keep_generating_debugmsg():
         await asyncio.sleep(D_MSG_WAIT + random.randint(3,10))
 
 def get_curr_spath():
-    """ Returns the path with minimum length from network_paths """
+    """ Returns the shortest path. If several share that length, the one with the highest avg_rssi. """
     global network_paths
     if not network_paths:
         return None
-    shortest = min(network_paths, key=lambda x: len(x["path"]))
-    return shortest["path"]
+    min_len = min(len(x["path"]) for x in network_paths)
+    shortest_paths = [x for x in network_paths if len(x["path"]) == min_len]
+    if len(shortest_paths) == 1:
+        logger.info(f"[NET] only one spath of length {min_len}, using it, avg_rssi={shortest_paths[0].get('avg_rssi')}")
+        return shortest_paths[0]["path"]
+    best = max(shortest_paths, key=lambda x: x.get("avg_rssi", -999))
+    logger.info(
+        f"[NET] more than 1 spath of length {min_len}, using one with max rssi_value={best.get('avg_rssi')} path={best['path']}"
+    )
+    return best["path"]
 
 def get_curr_neighbours():
     """ Returns the neighbours list from seen_neighbours """
@@ -2992,13 +3000,18 @@ async def network_response_generate(target):
         logger.error(f"[NET] error in network response generation: {e}")
 
 
-async def network_response_consume(msg, sender):
+async def network_response_consume(msg, sender, rssi, snr):
     global network_paths, seen_neighbours
     epoch_ms = get_epoch_ms()
-    # Remove old entry if exists and add new one with updated timestamp
-    seen_neighbours = [x for x in seen_neighbours if x.get("node") != sender]
-    seen_neighbours.append({"node": sender, "at": epoch_ms})
-    logger.info(f"[NET] updating {sender} in seen_neighbours")
+    neighbour = next((x for x in seen_neighbours if x["node"] == sender), None)
+    if neighbour is None:
+        neighbour = {"node": sender, "at": epoch_ms, "rssi_list": [], "snr_list": [], "avg_rssi": 0}
+        seen_neighbours.append(neighbour)
+    neighbour["rssi_list"] = (neighbour["rssi_list"] + [rssi])[-10:]
+    neighbour["snr_list"] = (neighbour["snr_list"] + [snr])[-10:]
+    neighbour["at"] = epoch_ms
+    neighbour["avg_rssi"] = sum(neighbour["rssi_list"]) / len(neighbour["rssi_list"])
+    logger.info(f"[NET] updating {sender} in seen_neighbours, avg_rssi: {neighbour['avg_rssi']}")
 
     if running_as_cc():
         logger.debug(f"Ignoring shortest path since I am cc")
@@ -3024,7 +3037,7 @@ async def network_response_consume(msg, sender):
 
 
     network_paths = [x for x in network_paths if x.get("next") != sender]
-    network_paths.append({"path": spath_received, "at": epoch_ms, "next": sender})
+    network_paths.append({"path": spath_received, "at": epoch_ms, "next": sender, "avg_rssi": neighbour["avg_rssi"]})
     logger.info(f"[NET] updated/added spath via node: {sender} to CC: {spath_received}")
 
 
