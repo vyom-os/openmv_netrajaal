@@ -4,13 +4,12 @@ from machine import LED
 import uasyncio as asyncio
 import json
 import utime
-from clock_utils import get_epoch_ms, format_epochms_str
+from clock_utils import get_epoch_ms, format_epochms_str, set_device_epoch_ms
 from config_store import ConfigStore
 from rsa.key import PublicKey, PrivateKey
 
 # Encryption policy
 ENCRYPTION_ENABLED = True
-rtc = machine.RTC()
 
 # Node address -> (n, e, d, p, q) for RSA PrivateKey.
 PVT_KEYS = {
@@ -97,7 +96,7 @@ my_addr = UID_TO_ADDR.get(uid)
 # 02.00.4
 major = 2  # (0-63)
 minor = 4  # (0-99)
-patch = 0  # (0-9)
+patch = 1  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
@@ -259,17 +258,8 @@ def set_machine_id(id):
 def get_machine_time():
     return get_epoch_ms()
 
-def set_machine_time(epoch_ms):
-    try:
-        # RT1062 RTC is second-precision; subseconds are always 0.
-        t = utime.gmtime(int(epoch_ms) // 1000)
-        # gmtime: (Y, M, D, h, m, s, weekday, yearday)
-        # RTC:    (Y, M, D, weekday, h, m, s, subseconds)       weekday 0=Mon..6=Sun
-        rtc.datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
-        return True
-    except Exception as e:
-        print(f"Error in set_machine_time: {e}")
-        return False
+def set_machine_time(epoch_ms):  # use clock_utils.set_device_epoch_ms() instead
+    return set_device_epoch_ms(epoch_ms)
 
 def _load_machine_keys(): 
     """ only being called if we have the machine id set already """

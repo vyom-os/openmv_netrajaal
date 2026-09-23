@@ -12,6 +12,7 @@ SUP_REBOOT_LOG_TIMEOUT_SEC = 10
 async def supervised(
     name,
     fn,
+    critical=False,
     delay=5,
     max_crashes=SUP_MAX_CONSECUTIVE_CRASHES,
 ):
@@ -30,15 +31,19 @@ async def supervised(
         crashes += 1
 
         if crashes >= max_crashes:
-            logger.fatal(
-                f"[SUP] {name} failed {crashes} times in a row, resetting machine"
-            )
-            try:
-                # Save logs, but don't let a dead SD card block the reset
-                await asyncio.wait_for(reboot_device(), SUP_REBOOT_LOG_TIMEOUT_SEC)
-            except Exception:
-                pass
-            machine.reset()
+            if critical:
+                logger.fatal(
+                    f"[SUP] {name} failed {crashes} times in a row, resetting machine"
+                )
+                try:
+                    # Save logs, but don't let a dead SD card block the reset
+                    await asyncio.wait_for(reboot_device(), SUP_REBOOT_LOG_TIMEOUT_SEC)
+                except Exception:
+                    pass
+                machine.reset()
+            else:
+                logger.fatal(f"[SUP] {name} failed {crashes} times in a row, exiting loop...")
+                break
         else:
             logger.warning(
                 f"[SUP] {name} failure {crashes}/{max_crashes} (ran {ran_ms} ms), restarting loop..."
