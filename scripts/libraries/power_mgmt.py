@@ -9,6 +9,7 @@ Keep camera awake for a whole burst; sleep only between capture events.
 """
 import sensor
 import logger
+from utils import print_exception
 
 _asleep = False
 
@@ -26,6 +27,7 @@ def camera_sleep():
         sensor.sleep(True)
         _asleep = True
     except Exception as e:
+        print_exception()
         logger.warning(f"[PWR] camera_sleep failed: {e}")
 
 
@@ -44,6 +46,7 @@ def camera_wake():
         sensor.skip_frames(time=500)
         _asleep = False
     except Exception as e:
+        print_exception()
         logger.warning(f"[PWR] camera_wake/skip_frames failed ({e}); re-init")
         try:
             sensor.reset()
@@ -52,6 +55,7 @@ def camera_wake():
             sensor.skip_frames(time=1000)
             _asleep = False
         except Exception as e2:
+            print_exception()
             logger.error(f"[PWR] camera re-init failed: {e2}")
 
 

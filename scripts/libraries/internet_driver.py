@@ -17,11 +17,13 @@ from message_codec import build_heartbeat_payload
 from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 import json
+from utils import print_exception
 
 try:
     import logger
     HAS_LOGGER = True
 except ImportError:
+    print_exception()
     HAS_LOGGER = False
 
     class SimpleLogger:
@@ -45,6 +47,7 @@ try:
 
     HAS_MACHINE_UART = True
 except ImportError:
+    print_exception()
     HAS_MACHINE_UART = False
     Pin = None
 
@@ -252,6 +255,7 @@ class InternetDriver(InternetUtils):
                     try:
                         time.sleep_ms(2000)
                     except Exception:
+                        print_exception()
                         pass
                     self.uart = _UARTSerialAdapter(uart)
                     print("using UART port")
@@ -266,6 +270,7 @@ class InternetDriver(InternetUtils):
                     self.rst = Pin(GSM_RST_PIN, Pin.OUT)
                     self.rst.value(1)  # idle: RESET_N released (active-low)
                 except Exception as e:
+                    print_exception()
                     print(f"[CELL] Reset pin {GSM_RST_PIN} init failed: {e}")
 
             self.context_id = 1 # PDP context id is a numbered slot where packet data is defined/activated, typically 1–16 on EC200, i.e: AT+QIDEACT=1, AT+QIACT=1, AT+QIACT?,AT+QHTTPCFG="contextid",1 
@@ -291,6 +296,7 @@ class InternetDriver(InternetUtils):
             self.network_status = NW_STATUS_UNKNOWN
 
         except Exception as e:
+            print_exception()
             print(f"Error in InternetDriver init: {e}")
             self.module_ready = False
             self.has_sim = False
@@ -321,6 +327,7 @@ class InternetDriver(InternetUtils):
                 else:
                     break  # buffer empty - no need to wait the full 200 ms
         except Exception:
+            print_exception()
             pass
 
         # Send command
@@ -344,10 +351,12 @@ class InternetDriver(InternetUtils):
                         response += chunk.decode("utf-8")
                     except Exception:
                         # Fallback: treat as latin-1 without keyword args for broad compatibility
+                        print_exception()
                         try:
                             response += chunk.decode("latin-1")
                         except Exception:
                             # As a last resort, ignore undecodable bytes
+                            print_exception()
                             pass
                 if wait_for and wait_for in response:
                     return True, response
@@ -368,6 +377,7 @@ class InternetDriver(InternetUtils):
             try:
                 self.uart.flush()
             except Exception:
+                print_exception()
                 pass
         await asyncio.sleep(drain_sleep)
 
@@ -385,6 +395,7 @@ class InternetDriver(InternetUtils):
                 await asyncio.sleep(drain_sleep)
                 return True
             except Exception as e:
+                print_exception()
                 print("[CELL] ✘✘✘ Failed to flush UART, error: {e}")
                 await asyncio.sleep(drain_sleep)
                 return False
@@ -511,6 +522,7 @@ class InternetDriver(InternetUtils):
         try:
             await self._send_command("AT+QHTTPSTOP", timeout=5)
         except Exception:
+            print_exception()
             pass
         await asyncio.sleep(0.2)
 
@@ -640,6 +652,7 @@ class InternetDriver(InternetUtils):
             await self._send_command("AT+QSCLK=1", timeout=2)
             print("[CELL] EC200 sleep enabled")
         except Exception:
+            print_exception()
             pass
 
     async def _exit_sleep(self):
@@ -658,6 +671,7 @@ class InternetDriver(InternetUtils):
             else:
                 print(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
         except Exception as e:
+            print_exception()
             print(f"[CELL] error waking from sleep: {e}")
         
     async def _check_network_healthy(self):
@@ -757,6 +771,7 @@ class InternetDriver(InternetUtils):
                     try:
                         return self._rsrp_to_pct(int(fields[2]))
                     except (ValueError, TypeError):
+                        print_exception()
                         return None
             return None
 
@@ -772,6 +787,7 @@ class InternetDriver(InternetUtils):
                     csq = int(line.split(":")[1].strip().split(",")[0])
                     return self._csq_to_pct(csq)
                 except (ValueError, IndexError, TypeError):
+                    print_exception()
                     return None
             return None
 
@@ -824,6 +840,7 @@ class InternetDriver(InternetUtils):
             else:
                 self.signal_strength = signal_strength
         except Exception as e:
+            print_exception()
             logger.error(f"[CELL] Error saving signal strength: {e}")
             self.signal_strength = 0
     
@@ -1002,9 +1019,11 @@ class InternetDriver(InternetUtils):
                         try:
                             response += chunk.decode("utf-8")
                         except Exception:
+                            print_exception()
                             try:
                                 response += chunk.decode("latin-1")
                             except Exception:
+                                print_exception()
                                 pass
 
                     # Look for +QHTTPPOST: response - only parse once the full line
@@ -1025,6 +1044,7 @@ class InternetDriver(InternetUtils):
                                 try:
                                     return int(s)
                                 except Exception:
+                                    print_exception()
                                     return default
 
                             err = _to_int(tokens[0], default=-1) if len(tokens) >= 1 else -1
@@ -1054,6 +1074,7 @@ class InternetDriver(InternetUtils):
                                 self.is_busy = False
                                 return False, 0, f"POST failed: QHTTPPOST err={err}"
                         except Exception as e:
+                            print_exception()
                             self.is_busy = False
                             return (
                                 False,
@@ -1073,6 +1094,7 @@ class InternetDriver(InternetUtils):
             return False, 0, "POST timeout"
 
         except Exception as e:
+            print_exception()
             logger.error("[CELL] Upload exception: %s" % e)
             self.on_upload_fail()
             self.is_busy = False
@@ -1122,6 +1144,7 @@ class InternetDriver(InternetUtils):
                 "enc": ENCRYPTION_ENABLED,
             }
         except Exception as e:
+            print_exception()
             logger.error(f"[PIR] Failed to get image payload: {e}")
             return None
         finally:
@@ -1197,6 +1220,7 @@ class InternetDriver(InternetUtils):
                     )
             return ok >= 2
         except Exception as e:
+            print_exception()
             print(f"Error in make_upload_test: {e}")
             return False
 
@@ -1216,6 +1240,7 @@ def init_dir():
         os.mkdir(LOG_DIR)
         is_writable = True
     except OSError:
+        print_exception()
         is_writable = False
         print("Error: SD card not writable, logs wouldn't be saved.")
         pass
@@ -1231,6 +1256,7 @@ if __name__ == "__main__":
         led_restart_blinker()
         init_dir()
     except Exception as e:
+        print_exception()
         print(f"Error in logging setup: {e}")
         
 
@@ -1248,6 +1274,7 @@ if __name__ == "__main__":
             asyncio.run(internet_module.establish_internet())
         except Exception as e:
             # Keep this handler simple; only treat UARTNotAvailableError specially.
+            print_exception()
             print(f"Internet driver init failed: {e}, Rebooting...")
             write_log(f"Internet driver init failed: {e}, Rebooting...")
             time.sleep(10)
@@ -1322,6 +1349,7 @@ if __name__ == "__main__":
         time.sleep(2)
         machine.reset()
     except Exception as e:
+        print_exception()
         print(f"Unexpected error: {e}, Rebooting...")
         write_log(f"Unexpected error: {e}, Rebooting...")
         time.sleep(10)

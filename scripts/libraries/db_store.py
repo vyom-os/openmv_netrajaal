@@ -6,6 +6,7 @@ import ubinascii
 import utime
 
 import logger
+from utils import print_exception
 
 
 class StoreUtils:
@@ -49,6 +50,7 @@ class StoreUtils:
                     f.write(data)
                     os.sync()
             except Exception as e:
+                print_exception()
                 logger.error(f"Could not save encrypted file {filepath} : {e}")
                 return False
             logger.info(f"[FS] Saved datafile: {filepath}, datasize: {len(data)} bytes")
@@ -64,6 +66,7 @@ class StoreUtils:
                     )
                     return True, data
             except Exception as e:
+                print_exception()
                 logger.error(f"[FS] -----  Failed to read file : {filepath}, e: {e}")
         return False, None
 
@@ -86,6 +89,7 @@ class StoreUtils:
                             try:
                                 self.register_fs_succ(True)
                             except Exception as e:
+                                print_exception()
                                 logger.error(f"[FS] register_fs_succ(True) failed: {e}")
                         return True
                     else:
@@ -98,14 +102,17 @@ class StoreUtils:
                 try:
                     self.register_fs_succ(False)
                 except Exception as e:
+                    print_exception()
                     logger.error(f"[FS] register_fs_succ(False) failed: {e}")
             return False
         except Exception as e:
+            print_exception()
             logger.error(f"Some unknown Error saving file {filepath}: {e}")
             if hasattr(self, "register_fs_succ"):
                 try:
                     self.register_fs_succ(False)
                 except Exception as e2:
+                    print_exception()
                     logger.error(
                         f"[FS] register_fs_succ(False) failed in exception path: {e2}"
                     )
@@ -211,6 +218,7 @@ class DbStore(StoreUtils):
                 logger.debug(f"[DB] SD card readable (attempt {attempt + 1})")
                 return True
             except OSError:
+                print_exception()
                 logger.warning(f"[DB] SD card not ready (attempt {attempt + 1}/5)")
         return False
 
@@ -227,6 +235,7 @@ class DbStore(StoreUtils):
                 self.process_id_str.encode()
             return True
         except OSError:
+            print_exception()
             logger.warning("[DB] SD card not writable")
             return False
 
@@ -247,6 +256,7 @@ class DbStore(StoreUtils):
                 try:
                     os.listdir(dir_path)
                 except OSError:
+                    print_exception()
                     logger.warning(
                         f"[DB] {dir_path} exists but is not a directory; recreating"
                     )
@@ -255,10 +265,12 @@ class DbStore(StoreUtils):
                         os.mkdir(dir_path)
                         logger.info(f"[DB] Recreated directory {dir_path}")
                     except OSError as e:
+                        print_exception()
                         logger.error(
                             f"[DB] Failed to recreate directory {dir_path}: {e}"
                         )
         except Exception as e:
+            print_exception()
             logger.error(f"[DB] Error ensuring directory {dir_path}: {e}")
 
     # ------------------------------------------------------------------
@@ -294,10 +306,12 @@ class DbStore(StoreUtils):
                 f"{self.IMG_LIST_CAPACITY} x {self.IMG_LIST_SLOT_SIZE // 1024}KB"
             )
         except MemoryError as e:
+            print_exception()
             logger.error(f"[DB] Failed to allocate image ring buffer: {e}")
             self.image_list_buffer = None
             self.image_queued_count = 0
         except Exception as e:
+            print_exception()
             logger.error(f"[DB] Error allocating image ring buffer: {e}")
             self.image_list_buffer = None
             self.image_queued_count = 0
@@ -351,6 +365,7 @@ class DbStore(StoreUtils):
                 return False
             return True
         except Exception as e:
+            print_exception()
             logger.error(f"[DB] storage_available failed for creator={creator}: {e}")
             return False
 
@@ -371,6 +386,7 @@ class DbStore(StoreUtils):
             else:
                 logger.warning("[DB] SD card not ready, skipping raw image save...")
         except Exception as e:
+            print_exception()
             logger.error(f"Failed to save raw image: {e}")
 
     def store_image(
@@ -535,6 +551,7 @@ class DbStore(StoreUtils):
                 # Do not block caller; schedule async write in background.
                 asyncio.create_task(self.save_file(img_bytes, enc_filepath))
             except Exception as e:
+                print_exception()
                 logger.error(
                     f"[DB] Failed to schedule encrypted image save to {enc_filepath}: {e}"
                 )

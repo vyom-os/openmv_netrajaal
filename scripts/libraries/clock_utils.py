@@ -1,5 +1,6 @@
 import utime
 import machine
+from utils import print_exception
 
 rtc = machine.RTC()
 
@@ -40,6 +41,7 @@ def set_device_epoch_ms(epoch_ms):
         ))
         return True
     except Exception as e:
+        print_exception()
         print("Error in set_device_epoch_ms: {}".format(e))
         return False
 

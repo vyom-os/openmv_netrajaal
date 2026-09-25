@@ -1,6 +1,7 @@
 import os
 import sys
 import logger
+from utils import print_exception
 
 
 def create_dir_if_not_exists(dir_path: str):
@@ -19,6 +20,7 @@ def create_dir_if_not_exists(dir_path: str):
                 os.listdir(dir_path)  # for valid diretory
                 logger.info(f"[FS] {dir_path} directory already exists")
             except OSError:
+                print_exception()
                 logger.warning(
                     f"dir:{dir_path} exists but not a directory, trying deleting and recreating..."
                 )
@@ -27,19 +29,23 @@ def create_dir_if_not_exists(dir_path: str):
                     os.mkdir(dir_path)
                     logger.info(f"info - Removed file {dir_path} and created directory")
                 except OSError as e:
+                    print_exception()
                     logger.error(
                         f"Failed to remove file {dir_path} and create directory: {e}, exiting..."
                     )
             except Exception as e:
+                print_exception()
                 logger.warning(f"[FS] Unexpected error accessing {dir_path}: {e}")
                 try:
                     os.remove(dir_path)
                     os.mkdir(dir_path)
                     logger.info(f"info - Removed file {dir_path} and created directory")
                 except OSError as e:
+                    print_exception()
                     logger.error(
                         f"Failed to remove file {dir_path} and create directory: {e}, exiting..."
                     )
 
     except Exception as e:
+        print_exception()
         logger.error(f"[FS] Failed to create/access {dir_path}: {e}")

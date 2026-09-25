@@ -1,8 +1,10 @@
 import os, struct
 import vfs, mimxrt
+from utils import print_exception
 try:
     from binascii import crc32
 except ImportError:
+    print_exception()
     print("Error: crc32 not found, using custom implementation")
     def crc32(data, crc=0):
         crc ^= 0xFFFFFFFF
@@ -29,11 +31,13 @@ class ConfigStore:
             print("/flash accessible !!")
         except OSError:  
             # /flash not mounted — mount it manually
+            print_exception()
             print("Error: /flash not mounted — mounting it manually")          
             try:
                 vfs.mount(vfs.VfsFat(mimxrt.Flash()), "/flash")
                 print("/flash mounted successfully")
             except OSError as e:
+                print_exception()
                 print(f"OSError: in mounting /flash manually, {str(e)}")
 
             os.chdir("/flash")
@@ -45,10 +49,12 @@ class ConfigStore:
                     if os.stat(f)[6] == self.slot:
                         continue
                 except OSError:
+                    print_exception()
                     pass
                 with open(f, 'wb') as fh:
                     fh.write(b'\x00' * self.slot); fh.flush()
         except Exception as e:
+            print_exception()
             print(f"Exception: in ensuring files, {str(e)}")
 
     def _read(self, f):
@@ -56,6 +62,7 @@ class ConfigStore:
             with open(f, 'rb') as fh:
                 raw = fh.read(self.slot)
         except OSError:
+            print_exception()
             return None
         if len(raw) < _HDR or raw[:4] != _MAGIC:
             return None
@@ -86,4 +93,6 @@ class ConfigStore:
         with open(self.files[target], 'r+b') as fh:
             fh.seek(0); fh.write(rec); fh.flush()
         try: os.sync()
-        except (AttributeError, OSError): pass
+        except (AttributeError, OSError):
+            print_exception()
+            pass

@@ -1,4 +1,4 @@
-from utils import int_to_nbytes
+from utils import int_to_nbytes, print_exception
 import ubinascii as _b64mod
 import logger
 
@@ -110,6 +110,7 @@ def parse_heartbeat_b64bytes(b64_bytes):  # string bytes should be send as encod
     try:
         raw_bytes = _b64mod.a2b_base64(b64_bytes)
     except Exception as e:
+        print_exception()
         logger.error(f"Invalid base64 heartbeat payload: {str(e)}")
         return {}
 
@@ -134,6 +135,7 @@ def encode_x_message(device_id, epoch_sec):
             raise ValueError("epoch_sec {} out of range".format(epoch_sec))
         return int_to_nbytes(device_id, DEVICE_ID_BYTES) + int_to_nbytes(epoch_sec, X_EPOCH_SEC_BYTES)
     except Exception as e:
+        print_exception()
         logger.error("Failed to encode X message: {}".format(e))
         return None
 
@@ -153,5 +155,6 @@ def decode_x_message(msgbytes):
         logger.error("Invalid X payload size: {}".format(len(msgbytes)))
         return None, None
     except Exception as e:
+        print_exception()
         logger.error("Failed to decode X message: {}".format(e))
         return None, None

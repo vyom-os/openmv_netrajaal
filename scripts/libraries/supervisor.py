@@ -3,7 +3,7 @@ import machine
 import utime
 import uasyncio as asyncio
 import logger
-from utils import reboot_device
+from utils import reboot_device, print_exception
 
 SUP_MAX_CONSECUTIVE_CRASHES = 10
 SUP_REBOOT_LOG_TIMEOUT_SEC = 10
@@ -24,7 +24,7 @@ async def supervised(
             logger.fatal(f"[SUP] `{name}` exited unexpectedly")
         except Exception as e:
             logger.fatal(f"[SUP] `{name}` crashed: {e}")
-            sys.print_exception(e)
+            print_exception(e)
 
         ran_ms = utime.ticks_diff(utime.ticks_ms(), started)
         logger.info(f"[SUP] `{name}` ran for {ran_ms} ms")
@@ -39,6 +39,7 @@ async def supervised(
                     # Save logs, but don't let a dead SD card block the reset
                     await asyncio.wait_for(reboot_device(), SUP_REBOOT_LOG_TIMEOUT_SEC)
                 except Exception:
+                    print_exception()
                     pass
                 machine.reset()
             else:
@@ -72,6 +73,7 @@ async def inf_background_loop():
                 raise RuntimeError(f"mock error on iteration {iteration}")
             await asyncio.sleep(TEST_LOOP_INTERVAL_SEC)
         except Exception as e:
+            print_exception()
             logger.error(f"[TEST] inf_background_loop breaking: {e}")
             break
     logger.warning("[TEST] inf_background_loop completed \n\n")
@@ -89,10 +91,11 @@ if __name__ == "__main__":
         asyncio.run(main())
         print("꩜꩜꩜꩜꩜꩜ main loop completed ** ꩜꩜꩜꩜꩜꩜")
     except KeyboardInterrupt:
+        print_exception()
         print("꩜꩜꩜꩜꩜꩜ stopped by user via keyboard interrupt ꩜꩜꩜꩜꩜꩜")
     except Exception as e:
         print(f"error... {e}")
-        sys.print_exception(e)
+        print_exception(e)
     finally:
         print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device... ꩜꩜꩜꩜꩜꩜")
         machine.reset()
