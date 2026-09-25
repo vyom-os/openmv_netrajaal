@@ -146,8 +146,9 @@ static vyomos_bdev_obj_t vyomos_bdev = {
     .base = { &vyomos_bdev_type },
 };
 
-// Format on first use, then mount at /vyomos. Failures are ignored so boot
-// still reaches /flash. This volume is not the USB MSC medium.
+// Mount an existing /vyomos volume. Do not format here: mkfs erases the old
+// ROMFS while this chip is still executing from flash, and boot.py never runs.
+// Failures are ignored so boot still reaches /flash. Not the USB MSC medium.
 void vyomos_fs_mount(void) {
     if (vyomos_flash_size() == 0 || vyomos_sector_size() == 0) {
         return;
@@ -171,14 +172,6 @@ void vyomos_fs_mount(void) {
         mp_obj_t fs = mp_call_function_1(lfs_type, bdev);
         mp_call_function_2(mount, fs, mount_point);
         nlr_pop();
-    } else {
-        nlr_buf_t nlr_mkfs;
-        if (nlr_push(&nlr_mkfs) == 0) {
-            mp_call_function_1(mp_load_attr(lfs_type, MP_QSTR_mkfs), bdev);
-            mp_obj_t fs = mp_call_function_1(lfs_type, bdev);
-            mp_call_function_2(mount, fs, mount_point);
-            nlr_pop();
-        }
     }
 
     nlr_pop();
