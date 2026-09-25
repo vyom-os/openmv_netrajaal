@@ -146,9 +146,31 @@ static vyomos_bdev_obj_t vyomos_bdev = {
     .base = { &vyomos_bdev_type },
 };
 
-// Mount an existing /vyomos volume. Do not format here: mkfs erases the old
-// ROMFS while this chip is still executing from flash, and boot.py never runs.
-// Failures are ignored so boot still reaches /flash. Not the USB MSC medium.
+// LittleFS v2 keeps the 8-byte magic "littlefs" at offset 8 of a superblock.
+// The root pair is the first two sectors. This is a raw flash read, so a
+// leftover ROMFS image is never parsed.
+static bool vyomos_has_lfs_magic(void) {
+    static const uint8_t lfs_magic[8] = "littlefs";
+    uint8_t found[8];
+    uint32_t base = vyomos_flash_base();
+    uint32_t sector = vyomos_sector_size();
+
+    flash_read_block(base + 8, found, sizeof(found));
+    if (memcmp(found, lfs_magic, sizeof(lfs_magic)) == 0) {
+        return true;
+    }
+    if (vyomos_flash_size() > sector) {
+        flash_read_block(base + sector + 8, found, sizeof(found));
+        if (memcmp(found, lfs_magic, sizeof(lfs_magic)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Create /vyomos on first boot, then mount it. mkfs erases the first two
+// sectors only, the same path /flash uses. A failed mkfs or mount returns
+// so boot.py still runs. Not the USB MSC medium.
 void vyomos_fs_mount(void) {
     if (vyomos_flash_size() == 0 || vyomos_sector_size() == 0) {
         return;
@@ -167,12 +189,11 @@ void vyomos_fs_mount(void) {
     mp_obj_t mount_point = mp_obj_new_str("/vyomos", 7);
     mp_obj_t mount = mp_load_attr(vfs_mod, MP_QSTR_mount);
 
-    nlr_buf_t nlr_mount;
-    if (nlr_push(&nlr_mount) == 0) {
-        mp_obj_t fs = mp_call_function_1(lfs_type, bdev);
-        mp_call_function_2(mount, fs, mount_point);
-        nlr_pop();
+    if (!vyomos_has_lfs_magic()) {
+        mp_call_function_1(mp_load_attr(lfs_type, MP_QSTR_mkfs), bdev);
     }
+    mp_obj_t fs = mp_call_function_1(lfs_type, bdev);
+    mp_call_function_2(mount, fs, mount_point);
 
     nlr_pop();
 }

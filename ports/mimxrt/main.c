@@ -159,13 +159,13 @@ soft_reset:
     }
 
     // USB disk is /flash, or /sdcard when a card is mounted.
-    // /vyomos is mounted afterwards and is never assigned here.
-    vyomos_fs_mount();
-
-    // Initialize TinyUSB after the filesystem is mounted.
+    // /vyomos is never assigned here.
+    // Bring USB up before the first-boot format of /vyomos.
     if (!tusb_inited()) {
         tusb_init();
     }
+
+    vyomos_fs_mount();
 
     // Initialize OpenMV protocol
     omv_protocol_init_default();
