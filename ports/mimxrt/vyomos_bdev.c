@@ -29,9 +29,11 @@
 
 #include "py/runtime.h"
 #include "py/mperrno.h"
+#include "py/mpprint.h"
 #include "extmod/vfs.h"
 #include "fsl_common.h"
 #include "fsl_romapi.h"
+#include "tusb.h"
 
 extern flexspi_nor_config_t qspiflash_config;
 
@@ -146,6 +148,15 @@ static vyomos_bdev_obj_t vyomos_bdev = {
     .base = { &vyomos_bdev_type },
 };
 
+// #region agent log
+static void vydbg(const char *msg, uint32_t a, uint32_t b) {
+    mp_printf(MP_PYTHON_PRINTER, "VYDBG %s %lu %lu\n", msg, (unsigned long)a, (unsigned long)b);
+    for (int i = 0; i < 300; i++) {
+        tud_task();
+    }
+}
+// #endregion
+
 // LittleFS v2 keeps the 8-byte magic "littlefs" at offset 8 of a superblock.
 // The root pair is the first two sectors. This is a raw flash read, so a
 // leftover ROMFS image is never parsed.
@@ -172,7 +183,14 @@ static bool vyomos_has_lfs_magic(void) {
 // sectors only, the same path /flash uses. A failed mkfs or mount returns
 // so boot.py still runs. Not the USB MSC medium.
 void vyomos_fs_mount(void) {
+    // #region agent log
+    vydbg("enter", vyomos_flash_base(), vyomos_flash_size());
+    vydbg("sector", vyomos_sector_size(), 0);
+    // #endregion
     if (vyomos_flash_size() == 0 || vyomos_sector_size() == 0) {
+        // #region agent log
+        vydbg("early-return", vyomos_flash_size(), vyomos_sector_size());
+        // #endregion
         return;
     }
 
@@ -180,6 +198,9 @@ void vyomos_fs_mount(void) {
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) != 0) {
+        // #region agent log
+        vydbg("nlr-fail", 0, 0);
+        // #endregion
         return;
     }
 
@@ -189,11 +210,27 @@ void vyomos_fs_mount(void) {
     mp_obj_t mount_point = mp_obj_new_str("/vyomos", 7);
     mp_obj_t mount = mp_load_attr(vfs_mod, MP_QSTR_mount);
 
-    if (!vyomos_has_lfs_magic()) {
+    // #region agent log
+    bool lfs_magic = vyomos_has_lfs_magic();
+    vydbg("magic", lfs_magic ? 1 : 0, vyomos_flash_base());
+    // #endregion
+    if (!lfs_magic) {
+        // #region agent log
+        vydbg("mkfs-start", vyomos_flash_base(), vyomos_sector_size());
+        // #endregion
         mp_call_function_1(mp_load_attr(lfs_type, MP_QSTR_mkfs), bdev);
+        // #region agent log
+        vydbg("mkfs-done", 0, 0);
+        // #endregion
     }
+    // #region agent log
+    vydbg("mount-start", lfs_magic ? 1 : 0, 0);
+    // #endregion
     mp_obj_t fs = mp_call_function_1(lfs_type, bdev);
     mp_call_function_2(mount, fs, mount_point);
+    // #region agent log
+    vydbg("mount-done", 0, 0);
+    // #endregion
 
     nlr_pop();
 }

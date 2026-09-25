@@ -131,6 +131,7 @@ endif
 ###################################################
 all: $(ROMFS_IMAGE)
 	$(SIZE) $(FW_DIR)/$(FIRMWARE).elf
+	@python3 -c 'import json,time; p="/home/anand/vyom/openmv_netrajaal/.cursor/debug-5a745f.log"; f=open(p,"a"); f.write(json.dumps({"sessionId":"5a745f","hypothesisId":"E","location":"port_config.mk","message":"firmware linked","data":{"elf":"$(FW_DIR)/$(FIRMWARE).elf"},"timestamp":int(time.time()*1000)})+"\n"); f.close()'
 
 # This target builds the firmware.
 $(FIRMWARE): $(OMV_FIRM_OBJ)
