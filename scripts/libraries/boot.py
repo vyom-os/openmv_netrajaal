@@ -162,8 +162,7 @@ LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-80
 LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
 LORA_POWER = 22           # Maximum power for strong signal margin
 LORA_PREAMBLE = 10        # Longer preamble for better sync detection
-# LoRa hobby-default sync word (0x12). Use same value on all devices in the mesh. 
-# 0x2B is the default sync word watchmen
+# Watchmen mesh sync word (not 0x12 hobby-default / not 0x34 LoRaWAN). Same on all devices.
 LORA_SYNC_WORD = 0x2B
 
 gps_module = None
@@ -301,6 +300,7 @@ async def init_device():
         logger.info(f"[INIT] DbStore initialized for process {PROCESS_ID_STR}")
     except Exception as e:
         logger.error(f"[INIT] Failed to initialize DbStore: {e}")
+        sys.print_exception(e)
         return False
     logger.info(
         f"[INIT] ===> MyAddr = {my_addr}, "
@@ -330,10 +330,12 @@ def init_file_recompile_buffer():
         return True
     except MemoryError as e:
         logger.error(f"[MEM] Failed to allocate file recompile buffer: {e}")
+        sys.print_exception(e)
         IMAGE_RECOMPILE_BUFFER = None
         return False
     except Exception as e:
         logger.error(f"[MEM] Error allocating file recompile buffer: {e}")
+        sys.print_exception(e)
         IMAGE_RECOMPILE_BUFFER = None
         return False
 
@@ -349,10 +351,12 @@ def init_chunk_storage_buffer():
         return True
     except MemoryError as e:
         logger.error(f"[MEM] Failed to allocate chunk storage buffer: {e}")
+        sys.print_exception(e)
         CHUNK_STORAGE_BUFFER = None
         return False
     except Exception as e:
         logger.error(f"[MEM] Error allocating chunk storage buffer: {e}")
+        sys.print_exception(e)
         CHUNK_STORAGE_BUFFER = None
         return False
 
@@ -392,6 +396,7 @@ async def reboot_device():
         print("REBOOTING DEVICE\n\n")
         machine.reset()
     except Exception as e: # Fail safe reboot
+        sys.print_exception(e)
         machine.reset()
 
 def get_epoch_ms(): # unix epoch milliseconds, eg. 1381791310000
@@ -606,6 +611,7 @@ async def keep_transmode_lock(device_id, filedata_id):
         logger.error(
             f"[IMG] TRANS MODE loop error, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, error={e}"
         )
+        sys.print_exception(e)
     finally:
         # Close only if this transfer still owns the lock (error, timeout, or unexpected exit)
         if trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id:
@@ -729,6 +735,7 @@ async def keep_restmode_lock():
         logger.error(
             f"[IMG] REST MODE loop error, error={e}"
         )
+        sys.print_exception(e)
     finally:
         # Close only if rest mode is still active (error, timeout, or unexpected exit)
         if restmode_in_progress:
@@ -810,8 +817,9 @@ async def init_lora():
         if loranode is not None:
             try:
                 loranode.clearDio1Action()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                sys.print_exception(e)
         else:
             loranode = SX1262(
                 spi_bus=1,
@@ -851,7 +859,8 @@ async def init_lora():
             try:
                 loranode.clearDio1Action()
             except Exception as e:
-                pass
+                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                sys.print_exception(e)
             return False
 
         # Set up interrupt callback for RX_DONE and TX_DONE
@@ -861,11 +870,13 @@ async def init_lora():
         return True
     except Exception as e:
         logger.error(f"[LORA] ✘✘✘ Exception during initialization: {str(e)}")
+        sys.print_exception(e)
         if loranode is not None:
             try:
                 loranode.clearDio1Action()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                sys.print_exception(e)
         return False
     finally:
         lora_init_in_progress = False
@@ -910,6 +921,7 @@ async def recover_lora(reason):
         return succ
     except Exception as e:
         logger.error(f"[LORA] ✘✘✘ Error recovering LoRa: {e}")
+        sys.print_exception(e)
         return False
 
 def lora_event_callback(events): # TODO Anand, merge radio_read into this function
@@ -934,8 +946,9 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
                 SX126X_IRQ_CRC_ERR | SX126X_IRQ_HEADER_ERR | SX126X_IRQ_RX_DONE
             )
             loranode.startReceive()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[LORA] Error clearing IRQ status: {e}")
+            sys.print_exception(e)
         return
 
     if events & SX126X_IRQ_RX_DONE:
@@ -960,6 +973,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
                 loranode.startReceive()
             except Exception as e:
                 logger.error(f"[LORA] Error clearing interrupt status: {e}")
+                sys.print_exception(e)
     # elif events & ERR_UNKNOWN:
     #     radio_recd_err_count += 10  # to make reset faster
     #     logger.error("[LORA] Unknown error, dropping packet")
@@ -972,11 +986,13 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             loranode.startReceive()
         except Exception as e:
             logger.error(f"[LORA] Error handling timeout in interrupt callback: {e}")
+            sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
                 loranode.startReceive()
             except Exception as e:
                 logger.error(f"[LORA] Error clearing interrupt status: {e}")
+                sys.print_exception(e)
     elif events & SX126X_IRQ_TX_DONE:
         # SX126x returns to standby after TX. _onIRQ already called startReceive(),
         # which also cleared IRQ flags.
@@ -988,6 +1004,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             loranode.startReceive()
         except Exception as e:
             logger.error(f"[LORA] Error clearing interrupt status: {e}")
+            sys.print_exception(e)
 
 
 async def lora_health_monitor():  # is_lora_ready is not being used
@@ -1061,6 +1078,7 @@ async def lora_health_monitor():  # is_lora_ready is not being used
                 )
                 await asyncio.sleep(RADIO_HEALTH_INTERVAL)
         except Exception as e:
+            sys.print_exception(e)
             await recover_lora(f"health monitor exception: {e}")
             await asyncio.sleep(RADIO_HEALTH_INTERVAL)
 
@@ -1177,8 +1195,9 @@ async def process_packet_queue(): # TODO Anand, (no change)
                                 if msg_typ_char == "I":  # I chunk packet
                                     i_chunk_index = i
                                     break
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.error(f"[QUEUE] Error parsing packet: {e}")
+                            sys.print_exception(e)
 
                     # If I chunk found, process it first; otherwise process first packet
                     if i_chunk_index is not None:
@@ -1277,6 +1296,7 @@ async def periodic_health_stats_loop():
             await asyncio.sleep(MEM_CLEANUP_INTERVAL_SEC)
         except Exception as e:
             logger.error(f"[MEM] error in memory cleanup: {e}")
+            sys.print_exception(e)
             await asyncio.sleep(MEM_CLEANUP_INTERVAL_SEC)
 
 # MSG TYPE = H(eartbeat), A(ck), B(egin), E(nd), C(hunk), S(hortest path)
@@ -1363,6 +1383,7 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
         return (False, None, None, None, None, [])
     except Exception as e:
         logger.fatal(f"[LORA] Exception in send_single_packet: {e}")
+        sys.print_exception(e)
         radio_sent_fail_count += 1
         return (False, None, None, None, None, [])
 
@@ -1393,6 +1414,7 @@ def encrypt_if_needed(msg_typ, msg):
         return msg
     except Exception as e:
         logger.error(f"Error in encrypt_if_needed error: {e}")
+        sys.print_exception(e)
         return None
 
 def is_rsa_encrypted(msg_typ):
@@ -1426,6 +1448,7 @@ async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messa
             return False, None, None, None, None
     except Exception as e:
         logger.error(f"[LORA] Exception in send_msg: {e}")
+        sys.print_exception(e)
         return False, None, None, None, None
 
 async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
@@ -1542,6 +1565,7 @@ def get_ack_msg_info(msg_uid):
                                 missingids.append(chunk_id)
                         except Exception as e: # failed to parse payload
                             logger.warning(f"[ACK] Failed to parse missing IDs payload {payload}: {e}")
+                            sys.print_exception(e)
                             return (0, None, None, None, None, [])
                 logger.debug(
                     f"[ACK] Matched ACK for {msg_uid}, "
@@ -1644,6 +1668,7 @@ def add_chunk(msgbytes, rssi=None, snr=None):
             img_last_logged_received = received
     except Exception as e:
         logger.error(f"[CHUNK] Error adding chunk: {e}, msgbytes_len={len(msgbytes)}")
+        sys.print_exception(e)
 
 def get_data_for_chunk_id(chunkiter):
     # Input: chunkiter: int chunk index; Output: memoryview or None for specific chunk
@@ -1706,11 +1731,13 @@ def recompile_msg(filedata_id):
 
         except MemoryError as e:
             logger.error(f"[CHUNK] MemoryError in recompile_msg for {filedata_id}: {e}")
+            sys.print_exception(e)
             free_mem = get_free_memory()
             logger.info(f"[MEM] Free memory after MemoryError: {free_mem}KB")
             return None
         except Exception as e:
             logger.error(f"[CHUNK] Exception in recompile_msg for {filedata_id}: {e}")
+            sys.print_exception(e)
             free_mem = get_free_memory()
             logger.info(f"[MEM] Free memory after exception: {free_mem}KB")
             return None
@@ -1982,6 +2009,7 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
                 sent_succ = False
         except Exception as e:
             logger.error(f"{log_tag} unexpected error sending file to next device: {e}")
+            sys.print_exception(e)
             sent_succ = False
     return sent_succ
 
@@ -2057,13 +2085,16 @@ async def hb_process(msg_uid, msgbytes, sender):
                 logger.debug(f"[HB] HB send msg = {decrypted_msg}")
             except Exception as e:
                 logger.error(f"[HB] Failed to decrypt HB message: {e}")
+                sys.print_exception(e)
         else:
             try:
                 logger.info(f"[HB] HB uploading, decoded msg = {msgbytes.decode()}, type={type(msgbytes)}")
             except Exception as e:
+                sys.print_exception(e)
                 try:
                     logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}, type={type(msgbytes)}")
                 except Exception as e:
+                    sys.print_exception(e)
                     logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}")
 
         return
@@ -2104,7 +2135,9 @@ def pir_interrupt_handler(pin):
         # logger.info(f"[PIR] Motion detected (interrupt)")
 
 async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
-    """Run send/enqueue off the PIR capture path; apply img counters when it finishes."""
+    """Run send/enqueue off the capture path; apply img counters when it finishes.
+    Returns True when the file was sent or queued, False otherwise.
+    """
     global img_capture_count
     try:
         fs_succ = await send_file_main_or_enqueue(
@@ -2112,10 +2145,13 @@ async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
         )
         if not fs_succ:
             img_capture_count -= 1
-            return
+            return False
+        return True
     except Exception as e:
         logger.error(f"[PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
+        sys.print_exception(e)
         img_capture_count -= 1
+        return False
 
 # PIR interrupt → capture → frame buffer → save → encrypt → queue
 # HIGH_TARGET_SIZE = 25 * 1024  # 25 KB, 556 chunks
@@ -2197,6 +2233,7 @@ def capture_image(compress_quality=None):
         return img_snapshot, jpeg_bytearray, event_epoch_ms
     except Exception as e:
         logger.error(f"[PIR] Failed to capture image: {e}")
+        sys.print_exception(e)
         return None, None, None
     finally:
         turn_OFF_IR_emitter()
@@ -2270,6 +2307,7 @@ async def person_detection_loop():
                             logger.debug("[WARNING] : GPS module is not initialized, skipping GPS location")
                     except Exception as e: # Not falat error
                         logger.warning(f"[PIR] Failed to get GPS location: {e}")
+                        sys.print_exception(e)
 
                     try:
                         logger.info(f"[PIR] GPS Data LAT={lat}, LON={lon}")
@@ -2278,6 +2316,7 @@ async def person_detection_loop():
                         ) + imgbytes
                     except Exception as e:
                         logger.error(f"[PIR] Failed to pack image meta header: {e}")
+                        sys.print_exception(e)
                         img_capture_count -= 1
                         led.off()
                         continue
@@ -2286,8 +2325,9 @@ async def person_detection_loop():
                         enc_msgbytes = encrypt_if_needed("P", imgbytes)
                         try:
                             del imgbytes
-                        except NameError:
-                            pass
+                        except NameError as e:
+                            logger.error(f"[PIR] Error deleting imgbytes: {e}")
+                            sys.print_exception(e)
                         if enc_msgbytes is None:
                             logger.error("[PIR] encrypt_if_needed returned enc_msgbytes=None")
                             img_capture_count -= 1
@@ -2298,6 +2338,7 @@ async def person_detection_loop():
 
                     except Exception as e:
                         logger.error(f"[PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
+                        sys.print_exception(e)
                         img_capture_count -= 1
                         continue
 
@@ -2307,6 +2348,7 @@ async def person_detection_loop():
                     led.off()
                     await asyncio.sleep(sleep_in_bursts)
                     logger.fatal(f"[PIR] unexpected error in image taking and saving for burst {i}: {e}")
+                    sys.print_exception(e)
                 finally:
                     try:
                         if img_snapshot is not None:
@@ -2314,11 +2356,13 @@ async def person_detection_loop():
                             gc.collect()
                     except Exception as e:
                         logger.warning(f"warning cleaning up image: {e}, can be ignored...")
+                        sys.print_exception(e)
                     led.off()
             await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
         except Exception as e:
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
             logger.error(f"[PIR] unexpected error in event taking and saving: {e}")
+            sys.print_exception(e)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
 
         finally:
             pir_burst_in_progress = False
@@ -2399,6 +2443,7 @@ async def image_sending_loop():
 
             except Exception as e:
                 logger.error(f"[IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued")
+                sys.print_exception(e)
                 store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
                 if not store_succ:
                     logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after exception, error={err}")
@@ -2410,10 +2455,9 @@ async def image_sending_loop():
                 try:
                     if enc_msgbytes is not None:
                         del enc_msgbytes
-                except NameError:
-                    pass
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"[IMG] Error deleting enc_msgbytes: {e}")
+                    sys.print_exception(e)
                 gc.collect()
 
         if db_store.get_img_queued_count() == 0:
@@ -2499,6 +2543,7 @@ def process_message(databytes, rssi=None, snr=None):
                 return False
         except Exception as e:
             logger.error(f"[CHUNK] decoding unicode {e} : {msgbytes}")
+            sys.print_exception(e)
             return False
     elif msg_typ == "I":
         try:
@@ -2512,6 +2557,7 @@ def process_message(databytes, rssi=None, snr=None):
                 logger.warning(f"[IMG RX] Chunk I message too short ({len(msgbytes)} bytes), cannot extract filedata_id")
         except Exception as e:
             logger.error(f"[IMG RX] Error processing chunk I: {e}")
+            sys.print_exception(e)
     elif msg_typ == "E": #
         global trans_msg_typ, trans_chunk_md5
         global stats_failed_count
@@ -2850,6 +2896,7 @@ async def keep_generating_heartbeat():
                         await reboot_device()
                     except Exception as e:
                         logger.error(f"reinitializing LoRa: {e}")
+                        sys.print_exception(e)
             else:
                 consecutive_hb_failures = 0
                 logger.info("[HB] ✔✔✔ HB SUCCESS")
@@ -2907,6 +2954,7 @@ def get_curr_neighbours():
         return [x.get("node") for x in seen_neighbours if isinstance(x, dict) and "node" in x]
     except Exception as e:
         logger.error(f"[NET] error in get_curr_neighbours: {e}")
+        sys.print_exception(e)
         return []
 
 def next_device_in_spath():
@@ -2972,6 +3020,7 @@ async def network_request_loop():
                     await asyncio.sleep(NETWORK_STABLE_SLEEP)
         except Exception as e:
             logger.error(f"[NET] error in spath request loop: {e}")
+            sys.print_exception(e)
             await asyncio.sleep(1)
 
 async def network_response_generate(target):
@@ -2998,6 +3047,7 @@ async def network_response_generate(target):
         asyncio.create_task(send_msg("Y", my_addr, new_spath_msg.encode(), target))
     except Exception as e:
         logger.error(f"[NET] error in network response generation: {e}")
+        sys.print_exception(e)
 
 
 async def network_response_consume(msg, sender, rssi, snr):
@@ -3025,6 +3075,7 @@ async def network_response_consume(msg, sender, rssi, snr):
         spath_received = [int(x.strip()) for x in msg_str.split(",")]
     except Exception as e:
         logger.error(f"Error parsing spath message: '{msg}', error: {e}")
+        sys.print_exception(e)
         return
 
     if my_addr in spath_received:
@@ -3067,6 +3118,7 @@ async def keep_updating_gps():
             gps_module = GPSDriver(uart=tracx_uart)
         except Exception as e:
             logger.error(f"[GPS] Failed to create GPS driver instance: {e}")
+            sys.print_exception(e)
             return
 
     try:
@@ -3110,6 +3162,7 @@ async def keep_updating_gps():
                         logger.info(f"[GPS] RTC updated with GPS time: {time_str}")
                 except Exception as e:
                     logger.warning(f"[GPS] Failed to update RTC: {e}")
+                    sys.print_exception(e)
             else:
                 gps_failure_count += 1
                 remain_ms = acquire_deadline - get_ms_diff()
@@ -3126,12 +3179,14 @@ async def keep_updating_gps():
 
     except Exception as e:
         logger.error(f"[GPS] error in GPS cycle: {e}")
+        sys.print_exception(e)
         try:
             if gps_module is not None:
                 async with tracx_uart_lock:
                     gps_module.enter_gps_sleep(sleep_module=running_as_unit())
-        except Exception as sleep_err:
-            logger.error(f"[GPS] Failed to enter sleep after error: {sleep_err}")
+        except Exception as e:
+            logger.error(f"[GPS] Failed to enter sleep after error: {e}")
+            sys.print_exception(e)
 
 # ---------------------------------------------------------------------------
 # All Handlers
@@ -3253,6 +3308,7 @@ class AppHandler:
             }
         except Exception as e:
             logger.error(f"[APP] error in list_images: {e}")
+            sys.print_exception(e)
             return {"queued": [], "sent": [], "failed": [], "progress": False}
 
     def clear_all_queue(self):
@@ -3262,6 +3318,7 @@ class AppHandler:
             return True
         except Exception as e:
             logger.error(f"[APP] error in clear_all_queue: {e}")
+            sys.print_exception(e)
             return False
 
     def get_saved_logs(self):
@@ -3288,6 +3345,7 @@ class AppHandler:
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"capture_image_to_verify_camera: {e}", "result": "fail"}, timeout=0.5)
             logger.error(f"[{type}] capture_image_to_verify_camera: {e} [Fail]")
+            sys.print_exception(e)
             return None
         finally:
             turn_OFF_IR_emitter()
@@ -3315,6 +3373,7 @@ class AppHandler:
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"Error while Establishing Internet!", "result": "fail"}, timeout=0.5)
             logger.error(f"[try_create_cc] error in try_create_cc: {e}")
+            sys.print_exception(e)
             return False
     
     def get_cc_enabled(self):   # FUNCTION 3
@@ -3359,6 +3418,7 @@ class AppHandler:
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"upload_verify_image_to_server: {e}", "result": "fail"}, timeout=0.5)
             logger.error(f"[verify_internet] upload_verify_image_to_server: {e}")
+            sys.print_exception(e)
             return False
 
     async def send_image_to_app(self):
@@ -3398,6 +3458,7 @@ class AppHandler:
 
         except Exception as e:
             logger.error(f"[verify_image] send_image_to_app error: {e}")
+            sys.print_exception(e)
             return False
         finally:
             img_bytes = None
@@ -3478,6 +3539,7 @@ async def power_save_loop():
                 await asyncio.sleep(0.1)
         except Exception as e:
             logger.warning(f"[PWR] power_save_loop error: {e}")
+            sys.print_exception(e)
             await asyncio.sleep(1)
 
 
@@ -3552,13 +3614,16 @@ async def main():
 try:
     asyncio.run(main())
     logger.info("꩜꩜꩜꩜꩜꩜ main loop completed ** ꩜꩜꩜꩜꩜꩜")
-except KeyboardInterrupt:
+except KeyboardInterrupt as e:
+    sys.print_exception(e)
     logger.info("꩜꩜꩜꩜꩜꩜ stopped by user via keyboard interrupt ꩜꩜꩜꩜꩜꩜")
 except Exception as e:
     logger.fatal(f"Uncaught error in main.py: {str(e)}")
+    sys.print_exception(e)
 finally:
     try:
         print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device... ꩜꩜꩜꩜꩜꩜")
         machine.reset()
     except Exception as e:
         logger.fatal(f"error in restarting the device in main.py: {str(e)}")
+        sys.print_exception(e)

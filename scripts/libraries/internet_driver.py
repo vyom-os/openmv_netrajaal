@@ -37,6 +37,9 @@ except ImportError:
         def warning(self, msg):
             print(f"[WARN] {msg}")
 
+        def fatal(self, msg):
+            print(f"[FATAL] {msg}")
+
     logger = SimpleLogger()
 
 # Try to import MicroPython UART (like internet_driver.py); fall back to desktop serial-only
@@ -75,7 +78,7 @@ def hardware_reset_gsm(hold_ms=None):
     AT/PDP/HTTP state is wiped — call establish_internet() afterwards.
     """
     if Pin is None:
-        print("[CELL] Cannot hardware-reset: Pin not available")
+        logger.error("[CELL] Cannot hardware-reset: Pin not available")
         return False
     if hold_ms is None:
         hold_ms = GSM_RST_HOLD_MS
@@ -137,12 +140,12 @@ class InternetUtils:
 
     def _rsrp_to_pct(self, rsrp):  # -44 dBm (perfect) to -140 dBm (worst)
         if rsrp is None:
-            print("Invalid RSRP value: None")
+            logger.warning("Invalid RSRP value: None")
             return None
 
         # 3GPP valid RSRP range
         if rsrp < -140 or rsrp > -44:
-            print(f"Invalid RSRP value: {rsrp}")
+            logger.warning(f"Invalid RSRP value: {rsrp}")
             return None
 
         # Display mapping range (tighter than 3GPP): below -120 → 0%, above -80 → 100%
@@ -150,26 +153,26 @@ class InternetUtils:
         MAX_RSRP = -80   # 100% signal
         clamped_rsrp = max(MIN_RSRP, min(MAX_RSRP, rsrp))
         signal_pct = int(round(((clamped_rsrp - MIN_RSRP) / (MAX_RSRP - MIN_RSRP)) * 100))
-        print(f"rsrp_to_pct: {rsrp} -> {signal_pct}")
+        logger.info(f"rsrp_to_pct: {rsrp} -> {signal_pct}")
         return signal_pct
     
     def _csq_to_pct(self, csq):  # 0 (worst) to 31 (perfect), 99 "unknown/no signal"
         if csq is None:
-            print("Invalid CSQ value: None")
+            logger.warning("Invalid CSQ value: None")
             return None
 
         # 99 = unknown / no signal
         if csq == 99:
-            print(f"CSQ value: {csq} showing no signal, returning 0")
+            logger.warning(f"CSQ value: {csq} showing no signal, returning 0")
             return 0
 
         # Valid CSQ range: 0 (worst) to 31 (perfect)
         if csq < 0 or csq > 31:
-            print(f"Invalid CSQ value: {csq}")
+            logger.warning(f"Invalid CSQ value: {csq}")
             return None
 
         signal_pct = min(100, int(round((csq / 31) * 100)))
-        print(f"csq_to_pct: {csq} -> {signal_pct}")
+        logger.info(f"csq_to_pct: {csq} -> {signal_pct}")
         return signal_pct
 
 
@@ -222,7 +225,7 @@ class InternetDriver(InternetUtils):
             self.machine_id = get_my_addr()
             self.configure_sensor = configure_sensor
             self.process_id = process_id
-            print("[CELL] InternetDriver initializing...")
+            logger.info("[CELL] InternetDriver initializing...")
             if self.configure_sensor:
                 sensor.reset()
                 sensor.set_pixformat(sensor.RGB565)
@@ -232,9 +235,9 @@ class InternetDriver(InternetUtils):
             # first reset hardware to clear any stale state
             ok = hardware_reset_gsm()
             if ok:
-                print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete.")
+                logger.info(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete.")
             else:
-                print("[CELL] ✘✘✘ Failed to reset hardware")
+                logger.error("[CELL] ✘✘✘ Failed to reset hardware")
             
             # If caller passed a MicroPython UART (like main.py does), adapt it.
             if uart is not None:
@@ -254,10 +257,10 @@ class InternetDriver(InternetUtils):
                     except Exception:
                         pass
                     self.uart = _UARTSerialAdapter(uart)
-                    print("using UART port")
+                    logger.info("using UART port")
                 else:
                     # Desktop/host environment: expect a serial-like object to be passed in
-                    print("ERROR - UART not available and no uart provided")
+                    logger.error("ERROR - UART not available and no uart provided")
                     raise Exception("ERROR - UART not available and no uart provided")
 
             self.rst = None
@@ -266,7 +269,7 @@ class InternetDriver(InternetUtils):
                     self.rst = Pin(GSM_RST_PIN, Pin.OUT)
                     self.rst.value(1)  # idle: RESET_N released (active-low)
                 except Exception as e:
-                    print(f"[CELL] Reset pin {GSM_RST_PIN} init failed: {e}")
+                    logger.error(f"[CELL] Reset pin {GSM_RST_PIN} init failed: {e}")
 
             self.context_id = 1 # PDP context id is a numbered slot where packet data is defined/activated, typically 1–16 on EC200, i.e: AT+QIDEACT=1, AT+QIACT=1, AT+QIACT?,AT+QHTTPCFG="contextid",1 
             self.default_timeout = 10  # 10 seconds
@@ -291,7 +294,7 @@ class InternetDriver(InternetUtils):
             self.network_status = NW_STATUS_UNKNOWN
 
         except Exception as e:
-            print(f"Error in InternetDriver init: {e}")
+            logger.error(f"Error in InternetDriver init: {e}")
             self.module_ready = False
             self.has_sim = False
             self.configured = False
@@ -381,14 +384,14 @@ class InternetDriver(InternetUtils):
         if hasattr(self.uart, "flush"):
             try:
                 self.uart.flush()
-                print("[CELL] ✔✔✔ UART flushed")
+                logger.info("[CELL] ✔✔✔ UART flushed")
                 await asyncio.sleep(drain_sleep)
                 return True
             except Exception as e:
-                print("[CELL] ✘✘✘ Failed to flush UART, error: {e}")
+                logger.error(f"[CELL] ✘✘✘ Failed to flush UART, error: {e}")
                 await asyncio.sleep(drain_sleep)
                 return False
-        print("[CELL] ✘✘✘ UART does not have flush method ☠︎☠︎☠︎")
+        logger.error("[CELL] ✘✘✘ UART does not have flush method ☠︎☠︎☠︎")
         return False
     
     async def _check_at_command_response(self, retries=5, timeout=5, delay_sec=2):
@@ -400,10 +403,10 @@ class InternetDriver(InternetUtils):
             success, _ = await self._send_command("AT", timeout=timeout)
             if success:
                 self.module_ready = True
-                print("[CELL] ✔✔✔ AT command response received")
+                logger.info("[CELL] ✔✔✔ AT command response received")
                 return True
             await asyncio.sleep(delay_sec)
-        print("[CELL] ✘✘✘ Failed to send AT command!")
+        logger.error("[CELL] ✘✘✘ Failed to send AT command!")
         self.module_ready = False
         return False
 
@@ -417,17 +420,17 @@ class InternetDriver(InternetUtils):
         success, resp = await self._send_command("AT+CPIN?", timeout=5)
 
         if not success:
-            print(f"[CELL] ✘✘✘ CPIN command failed: {resp}")
+            logger.error(f"[CELL] ✘✘✘ CPIN command failed: {resp}")
             self.has_sim = False
             return False
 
         if "+CPIN: READY" not in resp.upper():
-            print(f"[CELL] ✘✘✘ SIM not ready: {resp}")
+            logger.error(f"[CELL] ✘✘✘ SIM not ready: {resp}")
             self.has_sim = False
             return False
 
         self.has_sim = True
-        print("[CELL] ✔✔✔ SIM is ready")
+        logger.info("[CELL] ✔✔✔ SIM is ready")
         return True
     
     async def _activate_pdp_data_context(self, context_id=1):
@@ -445,7 +448,7 @@ class InternetDriver(InternetUtils):
         # reset/attach). Deactivate first, then configure APN.
         success, resp = await self._send_command(f"AT+QIDEACT={context_id}", timeout=10)
         if not success:
-            print(f"[CELL] QIDEACT ignored: {resp}")
+            logger.warning(f"[CELL] QIDEACT ignored: {resp}")
         await asyncio.sleep(1)
 
         # context_type=1 IPv4; authentication=0 NONE (Airtel has no PAP user/pass)
@@ -453,27 +456,27 @@ class InternetDriver(InternetUtils):
             f'AT+QICSGP={context_id},1,"{SIM_APN}","","",0', timeout=5
         )
         if not success:
-            print(f"[CELL] ✘✘✘ Failed to set APN: {resp}")
+            logger.error(f"[CELL] ✘✘✘ Failed to set APN: {resp}")
             _, err_resp = await self._send_command("AT+QIGETERROR", timeout=5)
-            print(f"[CELL] ✘✘✘ QIGETERROR after QICSGP: {err_resp}")
+            logger.error(f"[CELL] ✘✘✘ QIGETERROR after QICSGP: {err_resp}")
             return False
-        print(f"[CELL] APN set successfully to {SIM_APN}")
+        logger.info(f"[CELL] APN set successfully to {SIM_APN}")
 
         # PDP context set: 
         success, resp = await self._send_command(f"AT+QIACT={context_id}", timeout=30)
         if not success:
-            print(f"[CELL] ✘✘✘ Failed to activate PDP context: {resp}")
+            logger.error(f"[CELL] ✘✘✘ Failed to activate PDP context: {resp}")
             _, err_resp = await self._send_command("AT+QIGETERROR", timeout=5)
-            print(f"[CELL] ✘✘✘ QIGETERROR error: {err_resp}")
+            logger.error(f"[CELL] ✘✘✘ QIGETERROR error: {err_resp}")
             return False
 
         # AT+QIACT?: +QIACT: <id>,<state>   // state 1=activated (has IP), 0 or missing = deactivated
         success, resp = await self._send_command("AT+QIACT?", timeout=5)
         if not success or f"+QIACT: {context_id},1" not in resp:
-            print(f"[CELL] ✘✘✘ PDP context did not come up cleanly: {resp}")
+            logger.error(f"[CELL] ✘✘✘ PDP context did not come up cleanly: {resp}")
             return False
 
-        print("[CELL] ✔✔✔ PDP context activated")
+        logger.info("[CELL] ✔✔✔ PDP context activated")
         # First HTTPS (DNS + TLS) often returns QHTTPPOST 702 if we POST immediately.
         await asyncio.sleep(2)
         return True
@@ -486,24 +489,24 @@ class InternetDriver(InternetUtils):
         # Configure HTTP context (bind to PDP context)
         success, resp = await self._send_command(f'AT+QHTTPCFG="contextid",{context_id}')
         if not success:
-            print(f"[CELL] ✘✘✘ Failed to set context ID: {resp}")
+            logger.error(f"[CELL] ✘✘✘ Failed to set context ID: {resp}")
             return False
 
         # Configure simple JSON header behavior
         # Disable per-request header mode and set a fixed Content-Type header.
         success, resp = await self._send_command('AT+QHTTPCFG="requestheader",0')
         if not success:
-            print(f"[CELL] ✘✘✘ Failed to configure requestheader: {resp}")
+            logger.error(f"[CELL] ✘✘✘ Failed to configure requestheader: {resp}")
             return False
 
         success, resp = await self._send_command(
             'AT+QHTTPCFG="header","Content-Type: application/json"'
         )
         if not success:
-            print(f"[CELL] ✘✘✘ Failed to set default header: {resp}")
+            logger.error(f"[CELL] ✘✘✘ Failed to set default header: {resp}")
             return False
 
-        print("[CELL] ✔✔✔ HTTP context configured")
+        logger.info("[CELL] ✔✔✔ HTTP context configured")
         return True
 
     async def _http_stop(self):
@@ -526,9 +529,9 @@ class InternetDriver(InternetUtils):
         """
         ok = hardware_reset_gsm(hold_ms=hold_ms)
         if ok:
-            print(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
+            logger.info(f"[CELL] ✔✔✔ Hardware reset (RESET_N/{GSM_RST_PIN}) complete — re-init required")
         else:
-            print("[CELL] ✘✘✘ Failed to reset hardware")
+            logger.error("[CELL] ✘✘✘ Failed to reset hardware")
         self.module_ready = False
         self.has_sim = False
         self.configured = False
@@ -542,7 +545,7 @@ class InternetDriver(InternetUtils):
             bool: True on successful configuration, False on failure.
             error: Message or Error message in case of success and failure
         """
-        print("[CELL] Configuring EC200 module...")
+        logger.info("[CELL] Configuring EC200 module...")
 
         # Let module settle (e.g. after GPS/cellular handover, pending output)
         await asyncio.sleep(0.5)
@@ -551,48 +554,48 @@ class InternetDriver(InternetUtils):
         # internet retry, not only after a board restart.
         await self._exit_sleep()
         
-        print("[CELL] Draining past UART input...")
+        logger.info("[CELL] Draining past UART input...")
         if not await self._drain_past_uart_input():
-            print("[CELL] ✘✘✘ Failed to drain past UART input")
+            logger.error("[CELL] ✘✘✘ Failed to drain past UART input")
             return False, "Module configuration error: Failed to drain past UART input"
-        print("[CELL] [Step 0/4] ✔✔✔ UART input drained")
+        logger.info("[CELL] [Step 0/4] ✔✔✔ UART input drained")
 
-        print("[CELL] Checking AT command response...")
+        logger.info("[CELL] Checking AT command response...")
         if not await self._check_at_command_response():
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False
             self.configured = False
             return False, "Module configuration error: Failed to get AT response"
-        print("[CELL] [Step 1/4] ✔✔✔ AT command response received")
+        logger.info("[CELL] [Step 1/4] ✔✔✔ AT command response received")
 
-        print("[CELL] Checking SIM health...")
+        logger.info("[CELL] Checking SIM health...")
         if not await self._check_sim():
             self.has_sim = False
             self.configured = False
             return False, "Module configuration error: SIM not ready"
-        print("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
+        logger.info("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
 
-        print("[CELL] Activating PDP context...")
+        logger.info("[CELL] Activating PDP context...")
         if not await self._activate_pdp_data_context(1):
             self.configured = False
             return False, "Module configuration error: Failed to activate PDP context"
-        print("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
+        logger.info("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
         
         if stop_http:
-            print("[CELL] Stopping previous HTTP context...")
+            logger.info("[CELL] Stopping previous HTTP context...")
             await self._http_stop()
-            print("[CELL] [Step 3.2/4] ✔✔✔ Previous HTTP context stopped")
+            logger.info("[CELL] [Step 3.2/4] ✔✔✔ Previous HTTP context stopped")
 
-        print("[CELL] Configuring HTTP context...")
+        logger.info("[CELL] Configuring HTTP context...")
         if not await self._configure_http_context():
             self.configured = False
             return False, "Module configuration error: Failed to configure HTTP context"
-        print("[CELL] [Step 4/4] ✔✔✔ HTTP context configured")
+        logger.info("[CELL] [Step 4/4] ✔✔✔ HTTP context configured")
 
         self.module_ready = True
         self.has_sim = True
         self.configured = True
-        print("✔✔✔ EC200 module configured successfully")
+        logger.info("✔✔✔ EC200 module configured successfully")
         return True, None
 
     async def check_module_health(self):
@@ -607,7 +610,7 @@ class InternetDriver(InternetUtils):
             return True
     
     async def establish_internet(self, retry_count=3):
-        print("[CELL] Establishing internet connection... with sleep for 15 seconds")
+        logger.info("[CELL] Establishing internet connection... with sleep for 15 seconds")
         await asyncio.sleep(15) # sleep for 10 seconds to let module settle
         
         init_ok = False
@@ -617,18 +620,18 @@ class InternetDriver(InternetUtils):
             if init_success:
                 init_ok = True
                 break
-            print(f"[CELL] Internet init failed (attempt {attempt}/{retry_count}): {init_error}")
+            logger.warning(f"[CELL] Internet init failed (attempt {attempt}/{retry_count}): {init_error}")
             if attempt < retry_count:
                 await asyncio.sleep(2)
         if not init_ok:
             self.has_internet = False
-            print(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
+            logger.error(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
             await self._enter_sleep()
         else:
             upload_ok = await self.make_upload_test()
             self.has_internet = upload_ok
             if not upload_ok:
-                print("[CELL] has_internet=False: upload validation failed (<2/3 OK)")
+                logger.error("[CELL] has_internet=False: upload validation failed (<2/3 OK)")
 
     # ------------------------------------------------------------------
     # Health & diagnostics
@@ -638,7 +641,7 @@ class InternetDriver(InternetUtils):
         """Enable EC200 sleep (AT+QSCLK=1) to conserve power when unused."""
         try:
             await self._send_command("AT+QSCLK=1", timeout=2)
-            print("[CELL] EC200 sleep enabled")
+            logger.info("[CELL] EC200 sleep enabled")
         except Exception:
             pass
 
@@ -654,11 +657,11 @@ class InternetDriver(InternetUtils):
             await asyncio.sleep(0.2)
             success, resp = await self._send_command("AT+QSCLK=0", timeout=2)
             if success:
-                print("[CELL] EC200 sleep disabled (QSCLK=0)")
+                logger.info("[CELL] EC200 sleep disabled (QSCLK=0)")
             else:
-                print(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
+                logger.warning(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
         except Exception as e:
-            print(f"[CELL] error waking from sleep: {e}")
+            logger.error(f"[CELL] error waking from sleep: {e}")
         
     async def _check_network_healthy(self):
         """
@@ -669,20 +672,20 @@ class InternetDriver(InternetUtils):
         # AT+CEREG proves the module is alive AND confirms LTE data registration
         success, resp = await self._send_command("AT+CEREG?", timeout=4)
         if not success:
-            print("Connection not healthy: Failed to send AT+CEREG?")
+            logger.warning("Connection not healthy: Failed to send AT+CEREG?")
             return False
 
         nw_type, nw_status = self._parse_network_from_response(resp)
         if nw_type == NW_TYPE_UNKNOWN:
             success2, resp2 = await self._send_command("AT+CGREG?", timeout=4)
             if not success2:
-                print("Connection not healthy: Failed to send AT+CGREG?")
+                logger.warning("Connection not healthy: Failed to send AT+CGREG?")
                 self.save_network_type(NW_TYPE_UNKNOWN)
                 self.save_network_status(NW_STATUS_UNKNOWN)
                 return False
             nw_type, nw_status = self._parse_network_from_response(resp2)
             if nw_type == NW_TYPE_UNKNOWN:
-                print("Connection not healthy: Not registered on LTE or GPRS (3G/2G PS)")
+                logger.warning("Connection not healthy: Not registered on LTE or GPRS (3G/2G PS)")
                 self.save_network_type(NW_TYPE_UNKNOWN)
                 self.save_network_status(NW_STATUS_UNKNOWN)
                 return False
@@ -692,10 +695,10 @@ class InternetDriver(InternetUtils):
         # PDP context check, if packet data session is active, 1 => activated data path (has an IP)
         success, resp = await self._send_command("AT+QIACT?", timeout=4)
         if not success or f"+QIACT: 1,1" not in resp: # f"+QIACT: 1,0"
-            print("Connection not healthy: PDP context not active, triggering full recovery...")
+            logger.warning("Connection not healthy: PDP context not active, triggering full recovery...")
             return False
 
-        print("Connection is healthy")
+        logger.info("Connection is healthy")
         return True
 
     async def _ensure_network_healthy(self):
@@ -712,7 +715,7 @@ class InternetDriver(InternetUtils):
             elapsed_ms = time.ticks_diff(now_ms, self._last_recovery_fail_ticks)
             if elapsed_ms < recovery_cooldown_sec * 1000:
                 return False, "Connection failed (recovery cooldown)"
-        print("[CELL] Connection not healthy, attempting to recover...")
+        logger.warning("[CELL] Connection not healthy, attempting to recover...")
         await asyncio.sleep(2)
         init_success, init_error = await self._configure_module()
         if not init_success:
@@ -935,7 +938,7 @@ class InternetDriver(InternetUtils):
                     break
                 if "711" in resp and url_attempt == 0:
                     # PDP context was lost mid-flight - re-activate and retry once.
-                    print("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
+                    logger.warning("[CELL] CME ERROR 711: PDP context lost, attempting recovery...")
                     await asyncio.sleep(2)
                     init_success, init_error = await self._configure_module()
                     if not init_success:
@@ -943,7 +946,7 @@ class InternetDriver(InternetUtils):
                         self.is_busy = False
                         return False, 0, f"CME ERROR 711: PDP recovery failed: {init_error}"
                 else:
-                    print("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
+                    logger.error("[CELL] QHTTPURL failed, stopping HTTP session before retry/return")
                     await self._http_stop()
                     if url_attempt == 0:
                         continue
@@ -974,7 +977,7 @@ class InternetDriver(InternetUtils):
                 timeout=post_connect_timeout,
             )
             if not success:
-                print("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
+                logger.error("[CELL] QHTTPPOST CONNECT failed, stopping HTTP session")
                 await self._http_stop()
                 self.on_upload_fail()
                 self.is_busy = False
@@ -1171,10 +1174,10 @@ class InternetDriver(InternetUtils):
             ok = 0
             common_img_payload = self.get_image_payload()
             if not common_img_payload:
-                print("Error in make_upload_test: camera capture returned no image")
+                logger.error("Error in make_upload_test: camera capture returned no image")
                 return False
             for i in range(1, test_count + 1):
-                print(f"uploading {i}/{test_count}.....")
+                logger.info(f"uploading {i}/{test_count}.....")
                 start_ms = time.ticks_ms()
                 success, http_code, response = await self.upload_data(
                     common_img_payload, url, headers=headers
@@ -1182,22 +1185,22 @@ class InternetDriver(InternetUtils):
                 duration_ms = time.ticks_diff(time.ticks_ms(), start_ms)
                 if success:
                     ok += 1
-                    print(
+                    logger.info(
                         f"[{i}/{test_count}] SUCCESS | HTTP: {http_code} | {duration_ms/1000:.4f} seconds"
                     )
                     if ok >= 2:
-                        print("[CELL] ✔✔✔ Upload test passed, returning True...")
+                        logger.info("[CELL] ✔✔✔ Upload test passed, returning True...")
                         return True
                 else:
                     err = str(response) if response else ""
                     if len(err) > 100:
                         err = err[:100] + "..."
-                    print(
+                    logger.error(
                         f"[{i}/{test_count}] FAILED | HTTP: {http_code} | {duration_ms/1000:.4f} seconds | {err}"
                     )
             return ok >= 2
         except Exception as e:
-            print(f"Error in make_upload_test: {e}")
+            logger.error(f"Error in make_upload_test: {e}")
             return False
 
 # ------------------------------------------------------------------
@@ -1217,7 +1220,7 @@ def init_dir():
         is_writable = True
     except OSError:
         is_writable = False
-        print("Error: SD card not writable, logs wouldn't be saved.")
+        logger.warning("Error: SD card not writable, logs wouldn't be saved.")
         pass
         
 def write_log(message):
@@ -1231,30 +1234,30 @@ if __name__ == "__main__":
         led_restart_blinker()
         init_dir()
     except Exception as e:
-        print(f"Error in logging setup: {e}")
+        logger.error(f"Error in logging setup: {e}")
         
 
     try:
-        print("UID: ", f"{uid}")
+        logger.info(f"UID: {uid}")
         my_addr = get_my_addr()
         if my_addr is None:
-            print(f"error in internet_driver.py: Unknown device UID for {uid}, rebooting in 10 sec...")
+            logger.fatal(f"error in internet_driver.py: Unknown device UID for {uid}, rebooting in 10 sec...")
             time.sleep(10)
             machine.reset()
-        print(f"MY_ADDR: {my_addr}")
+        logger.info(f"MY_ADDR: {my_addr}")
         try:
             tracx_uart = UART(UART_ID, BAUDRATE, timeout=2000)
             internet_module = InternetDriver(uart=tracx_uart, configure_sensor=True)
             asyncio.run(internet_module.establish_internet())
         except Exception as e:
             # Keep this handler simple; only treat UARTNotAvailableError specially.
-            print(f"Internet driver init failed: {e}, Rebooting...")
+            logger.fatal(f"Internet driver init failed: {e}, Rebooting...")
             write_log(f"Internet driver init failed: {e}, Rebooting...")
             time.sleep(10)
             machine.reset()
 
         if not internet_module.configured:
-            print("Internet configuration failed! Rebooting...")
+            logger.fatal("Internet configuration failed! Rebooting...")
             write_log("Internet configuration failed!, Rebooting...")
             time.sleep(10)
             machine.reset()
@@ -1295,7 +1298,7 @@ if __name__ == "__main__":
                     f"[{attempt_no}/{total_uploads}] SUCCESS | HTTP: {http_code} | "
                     f"{sec:.4f} seconds | {filename}\n"
                 )
-                print(msg_ok)
+                logger.info(msg_ok)
                 write_log(msg_ok.rstrip())
             else:
                 fail_count += 1
@@ -1303,17 +1306,17 @@ if __name__ == "__main__":
                     f"[{attempt_no}/{total_uploads}] FAILED  | HTTP: {http_code} | "
                     f"{sec:.4f} seconds | {filename} | {response}\n"
                 )
-                print(msg_fail)
+                logger.error(msg_fail)
                 write_log(msg_fail.rstrip())
 
         avg_duration_ms = (
             (total_duration_ms // total_uploads) if total_uploads > 0 else 0
         )
-        print(f"Total: {total_uploads}")
-        print(f"Success: {success_count}")
-        print(f"Failed: {fail_count}")
-        print(f"Average duration: {avg_duration_ms} ms")
-        print("END, Rebooting the device...")
+        logger.info(f"Total: {total_uploads}")
+        logger.info(f"Success: {success_count}")
+        logger.info(f"Failed: {fail_count}")
+        logger.info(f"Average duration: {avg_duration_ms} ms")
+        logger.info("END, Rebooting the device...")
         write_log(f"Total: {total_uploads}")
         write_log(f"Success: {success_count}")
         write_log(f"Failed: {fail_count}")
@@ -1322,7 +1325,7 @@ if __name__ == "__main__":
         time.sleep(2)
         machine.reset()
     except Exception as e:
-        print(f"Unexpected error: {e}, Rebooting...")
+        logger.fatal(f"Unexpected error: {e}, Rebooting...")
         write_log(f"Unexpected error: {e}, Rebooting...")
         time.sleep(10)
         machine.reset()
