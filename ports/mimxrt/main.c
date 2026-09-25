@@ -72,6 +72,8 @@
 #include "mimxrt_hal.h"
 #include "omv_protocol.h"
 
+extern void vyomos_fs_mount(void);
+
 int main(void) {
     bool first_soft_reset = true;
 
@@ -155,6 +157,10 @@ soft_reset:
     if (mp_vfs_lookup_path(path, &path) != MP_VFS_NONE) {
         mimxrt_msc_medium = &machine_sdcard_type;
     }
+
+    // USB disk is /flash, or /sdcard when a card is mounted.
+    // /vyomos is mounted afterwards and is never assigned here.
+    vyomos_fs_mount();
 
     // Initialize TinyUSB after the filesystem is mounted.
     if (!tusb_inited()) {
