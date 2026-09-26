@@ -626,30 +626,35 @@ class InternetDriver(InternetUtils):
         if not init_ok:
             self.has_internet = False
             logger.error(f"[ERROR] : [CELL] Internet init failed after {retry_count} attempts: {init_error}")
-            await self._enter_sleep()
         else:
             upload_ok = await self.make_upload_test()
             self.has_internet = upload_ok
             if not upload_ok:
                 logger.error("[CELL] has_internet=False: upload validation failed (<2/3 OK)")
 
+        # Unit node (no internet, or CC disabled): cellular RF off.
+        # Next init/retry calls _configure_module -> _exit_sleep, which turns RF back on.
+        if self.running_as_unit():
+            await self._enter_sleep()
+
     # ------------------------------------------------------------------
     # Health & diagnostics
     # ------------------------------------------------------------------
 
     async def _enter_sleep(self):
-        """Enable EC200 sleep (AT+QSCLK=1) to conserve power when unused."""
+        """Stop cellular RF, then allow EC200 UART sleep. GNSS (AT+QGPS) still works in CFUN=4."""
         try:
+            await self._send_command("AT+CFUN=4", timeout=15)
+            logger.info("[CELL] Cellular antenna off (CFUN=4)")
             await self._send_command("AT+QSCLK=1", timeout=2)
             logger.info("[CELL] EC200 sleep enabled")
         except Exception:
             pass
 
     async def _exit_sleep(self):
-        """Wake from AT+QSCLK=1. First UART bytes only wake the UART; then disable sleep.
+        """Wake UART, then turn cellular RF back on.
 
-        Call this at the start of every `_configure_module` (next internet retry).
-        A board restart also wakes via hardware reset, but that is the slow path.
+        Call this at the start of every `_configure_module` (init and each retry).
         """
         try:
             # Dummy AT: while asleep the first command is often lost; that is OK.
@@ -660,6 +665,11 @@ class InternetDriver(InternetUtils):
                 logger.info("[CELL] EC200 sleep disabled (QSCLK=0)")
             else:
                 logger.warning(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
+            success, resp = await self._send_command("AT+CFUN=1", timeout=15)
+            if success:
+                logger.info("[CELL] Cellular antenna on (CFUN=1)")
+            else:
+                logger.warning(f"[CELL] CFUN=1 not confirmed: {resp}")
         except Exception as e:
             logger.error(f"[CELL] error waking from sleep: {e}")
         
@@ -819,6 +829,17 @@ class InternetDriver(InternetUtils):
         else:
             self.is_cc_enabled = False
             logger.info("[CELL] ✔✔✔ CC disabled")
+        # Role lives here: unit node is "no internet or CC off", not a call from main.
+        try:
+            asyncio.create_task(self._apply_role_antenna())
+        except Exception as e:
+            logger.error(f"[CELL] could not apply antenna for role change: {e}")
+
+    async def _apply_role_antenna(self):
+        if self.running_as_unit():
+            await self._enter_sleep()
+        else:
+            await self._exit_sleep()
 
     def save_signal_strength(self, signal_strength):
         try:
