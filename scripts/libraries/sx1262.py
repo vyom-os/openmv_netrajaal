@@ -1,7 +1,6 @@
 from machine import Pin
 from _sx126x import *
 from sx126x import SX126X
-from utils import print_exception
 
 _SX126X_PA_CONFIG_SX1262 = const(0x00)
 
@@ -254,7 +253,6 @@ class SX1262(SX126X):
         try:
             state = super().receive(data_mv, length, timeout_en, timeout_ms)
         except AssertionError as e:
-            print_exception()
             state = list(ERROR.keys())[list(ERROR.values()).index(str(e))]
 
         if state == ERR_NONE or state == ERR_CRC_MISMATCH:
@@ -290,7 +288,6 @@ class SX1262(SX126X):
         try:
             state = super().readData(data_mv, length)
         except AssertionError as e:
-            print_exception()
             state = list(ERROR.keys())[list(ERROR.values()).index(str(e))]
 
         # PacketStatus is overwritten by the next RX; grab it before startReceive.
@@ -298,7 +295,6 @@ class SX1262(SX126X):
             self._last_rssi = super().getRSSI()
             self._last_snr = super().getSNR()
         except Exception:
-            print_exception()
             self._last_rssi = None
             self._last_snr = None
 
@@ -307,11 +303,9 @@ class SX1262(SX126X):
         try:
             super().startReceive()
         except Exception:
-            print_exception()
             try:
                 super().setRx(SX126X_RX_TIMEOUT_INF)
             except Exception:
-                print_exception()
                 pass
 
         if state == ERR_NONE or state == ERR_CRC_MISMATCH:

@@ -7,7 +7,6 @@ import utime
 from clock_utils import get_epoch_ms, format_epochms_str, set_device_epoch_ms
 from config_store import ConfigStore
 from rsa.key import PublicKey, PrivateKey
-from utils import print_exception
 
 # Encryption policy
 ENCRYPTION_ENABLED = True
@@ -97,7 +96,7 @@ my_addr = UID_TO_ADDR.get(uid)
 # 02.00.4
 major = 2  # (0-63)
 minor = 4  # (0-99)
-patch = 4  # (0-9)
+patch = 5  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
@@ -192,7 +191,6 @@ def set_gps_location(lat: float= None, lon: float = None, gps_time: int = 0):
         if lat and lon and gps_time: # only save if get value
             set_key_value('gps_location', {'lat': lat, 'lon': lon, 'gps_time': gps_time})
     except Exception as e:
-        print_exception()
         print(f"Error in set_gps_location: {str(e)}")
         set_key_value('gps_location', None)
 
@@ -202,7 +200,6 @@ def get_gps_location():
         try:
             return gps_location['lat'], gps_location['lon'], gps_location['gps_time']
         except Exception as e:
-            print_exception()
             print(f"Error in get_gps_location: {str(e)}")
             set_key_value('gps_location', None)
             return None, None, 0
@@ -286,7 +283,6 @@ def _load_machine_keys():
             set_key_value("machine_keys", keys)
             return keys
     except Exception as e:
-        print_exception()
         print(f"Error in _load_machine_keys: {e}")
         return None
 
@@ -301,7 +297,6 @@ def get_pub_key(address=None):
             return None
         return PublicKey(keys["n"], keys["e"])
     except Exception as e:
-        print_exception()
         print(f"Error in get_pub_key: {e}")
         return None
 
@@ -315,7 +310,6 @@ def get_pvt_key():
             return None
         return PrivateKey(keys["n"], keys["e"], keys["d"], keys["p"], keys["q"])
     except Exception as e:
-        print_exception()
         print(f"Error in get_pvt_key: {e}")
         return None
 

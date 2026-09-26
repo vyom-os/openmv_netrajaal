@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import gc
 import hashlib
 import os
@@ -6,7 +7,6 @@ import ubinascii
 import utime
 
 import logger
-from utils import print_exception
 
 
 class StoreUtils:
@@ -50,7 +50,6 @@ class StoreUtils:
                     f.write(data)
                     os.sync()
             except Exception as e:
-                print_exception()
                 logger.error(f"Could not save encrypted file {filepath} : {e}")
                 return False
             logger.info(f"[FS] Saved datafile: {filepath}, datasize: {len(data)} bytes")
@@ -66,7 +65,6 @@ class StoreUtils:
                     )
                     return True, data
             except Exception as e:
-                print_exception()
                 logger.error(f"[FS] -----  Failed to read file : {filepath}, e: {e}")
         return False, None
 
@@ -89,7 +87,6 @@ class StoreUtils:
                             try:
                                 self.register_fs_succ(True)
                             except Exception as e:
-                                print_exception()
                                 logger.error(f"[FS] register_fs_succ(True) failed: {e}")
                         return True
                     else:
@@ -102,17 +99,14 @@ class StoreUtils:
                 try:
                     self.register_fs_succ(False)
                 except Exception as e:
-                    print_exception()
                     logger.error(f"[FS] register_fs_succ(False) failed: {e}")
             return False
         except Exception as e:
-            print_exception()
             logger.error(f"Some unknown Error saving file {filepath}: {e}")
             if hasattr(self, "register_fs_succ"):
                 try:
                     self.register_fs_succ(False)
                 except Exception as e2:
-                    print_exception()
                     logger.error(
                         f"[FS] register_fs_succ(False) failed in exception path: {e2}"
                     )
@@ -218,7 +212,6 @@ class DbStore(StoreUtils):
                 logger.debug(f"[DB] SD card readable (attempt {attempt + 1})")
                 return True
             except OSError:
-                print_exception()
                 logger.warning(f"[DB] SD card not ready (attempt {attempt + 1}/5)")
         return False
 
@@ -235,7 +228,6 @@ class DbStore(StoreUtils):
                 self.process_id_str.encode()
             return True
         except OSError:
-            print_exception()
             logger.warning("[DB] SD card not writable")
             return False
 
@@ -256,7 +248,6 @@ class DbStore(StoreUtils):
                 try:
                     os.listdir(dir_path)
                 except OSError:
-                    print_exception()
                     logger.warning(
                         f"[DB] {dir_path} exists but is not a directory; recreating"
                     )
@@ -265,12 +256,10 @@ class DbStore(StoreUtils):
                         os.mkdir(dir_path)
                         logger.info(f"[DB] Recreated directory {dir_path}")
                     except OSError as e:
-                        print_exception()
                         logger.error(
                             f"[DB] Failed to recreate directory {dir_path}: {e}"
                         )
         except Exception as e:
-            print_exception()
             logger.error(f"[DB] Error ensuring directory {dir_path}: {e}")
 
     # ------------------------------------------------------------------
@@ -306,12 +295,10 @@ class DbStore(StoreUtils):
                 f"{self.IMG_LIST_CAPACITY} x {self.IMG_LIST_SLOT_SIZE // 1024}KB"
             )
         except MemoryError as e:
-            print_exception()
             logger.error(f"[DB] Failed to allocate image ring buffer: {e}")
             self.image_list_buffer = None
             self.image_queued_count = 0
         except Exception as e:
-            print_exception()
             logger.error(f"[DB] Error allocating image ring buffer: {e}")
             self.image_list_buffer = None
             self.image_queued_count = 0
@@ -365,7 +352,6 @@ class DbStore(StoreUtils):
                 return False
             return True
         except Exception as e:
-            print_exception()
             logger.error(f"[DB] storage_available failed for creator={creator}: {e}")
             return False
 
@@ -386,7 +372,6 @@ class DbStore(StoreUtils):
             else:
                 logger.warning("[DB] SD card not ready, skipping raw image save...")
         except Exception as e:
-            print_exception()
             logger.error(f"Failed to save raw image: {e}")
 
     def store_image(
@@ -551,7 +536,6 @@ class DbStore(StoreUtils):
                 # Do not block caller; schedule async write in background.
                 asyncio.create_task(self.save_file(img_bytes, enc_filepath))
             except Exception as e:
-                print_exception()
                 logger.error(
                     f"[DB] Failed to schedule encrypted image save to {enc_filepath}: {e}"
                 )
@@ -718,3 +702,86 @@ class DbStore(StoreUtils):
     def clear_image_list(self):
         # TODO akash, make it
         return True
+
+
+# /vyomos/log.txt. No lock, and /vyomos is not created here.
+LOG_PATH = "/vyomos/log.txt"
+LOG_TMP_PATH = "/vyomos/log.tmp"
+LOG_OLD_PATH = "/vyomos/log.txt.old"
+
+LOG_MAX_BYTES = 3 * 1024 * 1024
+LOG_DROP_BYTES = 1 * 1024 * 1024
+LOG_CHUNK_BYTES = 4096
+LOG_NEWLINE_SCAN_BYTES = 256
+
+
+def _log_file_size():
+    try:
+        return os.stat(LOG_PATH)[6]
+    except OSError as e:
+        if e.args and e.args[0] == errno.ENOENT:
+            return 0
+        raise
+
+
+def _append_log_line(line):
+    with open(LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
+def _keep_newer_tail():
+    try:
+        os.remove(LOG_TMP_PATH)
+    except OSError as e:
+        if not e.args or e.args[0] != errno.ENOENT:
+            raise
+
+    with open(LOG_PATH, "rb") as src:
+        src.seek(LOG_DROP_BYTES)
+        window = src.read(LOG_NEWLINE_SCAN_BYTES)
+        newline_at = window.find(b"\n")
+        if newline_at >= 0:
+            pending = window[newline_at + 1:]
+        else:
+            pending = window
+        with open(LOG_TMP_PATH, "wb") as dst:
+            dst.write(pending)
+            while True:
+                chunk = src.read(LOG_CHUNK_BYTES)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+    os.rename(LOG_PATH, LOG_OLD_PATH)
+    try:
+        os.rename(LOG_TMP_PATH, LOG_PATH)
+    except Exception:
+        os.rename(LOG_OLD_PATH, LOG_PATH)
+        raise
+    try:
+        os.remove(LOG_OLD_PATH)
+    except Exception:
+        pass
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+
+def _trim_log_file():
+    while True:
+        size = _log_file_size()
+        if size < LOG_MAX_BYTES:
+            return
+        if size <= LOG_DROP_BYTES:
+            os.remove(LOG_PATH)
+            return
+        _keep_newer_tail()
+        new_size = _log_file_size()
+        if new_size >= size:
+            return
+
+
+def append_log_line(line):
+    _append_log_line(line)
+    _trim_log_file()

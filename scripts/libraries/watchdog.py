@@ -13,7 +13,6 @@ import machine
 import time
 import uasyncio as asyncio
 import logger
-from utils import print_exception
 
 WDT_TIMEOUT_MS = 90_000
 wdt = None
@@ -110,5 +109,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print_exception()
         print("Watchdog test interrupted")

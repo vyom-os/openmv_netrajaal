@@ -1,6 +1,5 @@
 import utime
 import machine
-from utils import print_exception
 
 rtc = machine.RTC()
 
@@ -12,17 +11,35 @@ def get_epoch_ms():  # unix epoch milliseconds, eg. 1381791310000
 def get_epoch_sec():  # unix epoch seconds, eg. 1736931600
     return get_epoch_ms() // 1000
 
+
 def get_uptime_ms():  # milliseconds since device boot
     return utime.ticks_ms()
+
 
 def get_uptime_sec():  # seconds since device boot
     return get_uptime_ms() // 1000
 
+
 def format_epochms_str(epoch_ms):
     if epoch_ms is None:
         return None
-    y, mo, d, h, mi, s, _, _ = utime.gmtime(int(epoch_ms) // 1000)
-    return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(y, mo, d, h, mi, s)
+    epoch_ms = int(epoch_ms)
+    y, mo, d, h, mi, s, _, _ = utime.gmtime(epoch_ms // 1000)
+    ms = epoch_ms % 1000
+    return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d},{:03d}".format(
+        y, mo, d, h, mi, s, ms
+    )
+
+
+def timestamp_str():
+    y, mo, d, _, h, m, s, _ = rtc.datetime()
+    # Get milliseconds from ticks_ms (approximate, but close enough)
+    ms = utime.ticks_ms() % 1000
+    return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def timestamp_str_2():
+    return format_epochms_str(get_epoch_ms())
 
 
 def set_device_epoch_ms(epoch_ms):
@@ -35,13 +52,14 @@ def set_device_epoch_ms(epoch_ms):
         # gmtime: (Y, M, D, h, m, s, weekday, yearday)
         # RTC:    (Y, M, D, weekday, h, m, s, subseconds)       weekday 0=Mon..6=Sun
         rtc.datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
-        print("Device time {} -> {}".format(
-            format_epochms_str(prev_ms),
-            format_epochms_str(epoch_ms),
-        ))
+        print(
+            "Device time {} -> {}".format(
+                format_epochms_str(prev_ms),
+                format_epochms_str(epoch_ms),
+            )
+        )
         return True
     except Exception as e:
-        print_exception()
         print("Error in set_device_epoch_ms: {}".format(e))
         return False
 
@@ -51,7 +69,8 @@ def set_device_epoch_sec(epoch_sec):
     return set_device_epoch_ms(int(epoch_sec) * 1000)
 
 
-if __name__ == "__main__":
+# ========== Test cases ==========
+def main_1():
     # 2024-01-01 00:00:00 UTC, then 2026-09-22 12:00:00 UTC
     target_2024_sec = 1704067200
     target_2024_ms = target_2024_sec * 1000
@@ -81,4 +100,48 @@ if __name__ == "__main__":
     ok_2026 = set_device_epoch_ms(target_2026_ms)
     pass_2026 = _check("2) set 2026", target_2026_ms, ok_2026, get_epoch_ms())
 
-    print("======== {} ========".format("TEST PASSED" if pass_2024 and pass_2026 else "TEST FAILED"))
+    print(
+        "======== {} ========".format(
+            "TEST PASSED" if pass_2024 and pass_2026 else "TEST FAILED"
+        )
+    )
+
+
+def main_2():
+    """Print 2500 logs from each timestamp function, 0.5 ms apart, and report the elapsed time."""
+    count = 2500
+    gap_us = 500
+    target_2026_sec = 1790078400
+    target_2026_ms = target_2026_sec * 1000
+    ok_2026 = set_device_epoch_ms(target_2026_ms)
+
+    print("")
+    print("======== timestamp_str x{} ========".format(count))
+    start = utime.ticks_ms()
+    for i in range(count):
+        print("timestamp_str: {}".format(timestamp_str()))
+        utime.sleep_us(gap_us)
+    elapsed_str_ms = utime.ticks_diff(utime.ticks_ms(), start)
+    print("timestamp_str: {} logs in {} ms".format(count, elapsed_str_ms))
+    print("")
+
+    print("======== timestamp_str_2 x{} ========".format(count))
+    start = utime.ticks_ms()
+    for i in range(count):
+        print("timestamp_str_2:  {}".format(timestamp_str_2()))
+        utime.sleep_us(gap_us)
+    elapsed_str2_ms = utime.ticks_diff(utime.ticks_ms(), start)
+    print("timestamp_str_2: {} logs in {} ms".format(count, elapsed_str2_ms))
+    print("")
+
+    print("======== done ========")
+    print("timestamp_str: {} ms".format(elapsed_str_ms))
+    print("timestamp_str_2: {} ms".format(elapsed_str2_ms))
+
+
+if __name__ == "__main__":
+    test = 2
+    if test == 1:
+        main_1()
+    elif test == 2:
+        main_2()

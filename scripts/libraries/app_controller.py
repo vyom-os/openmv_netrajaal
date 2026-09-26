@@ -9,7 +9,6 @@ import network
 import uselect as select
 import ubinascii
 import hashlib
-from utils import print_exception
         
 # Auto-disconnect WiFi + app TCP session after this many seconds (from successful socket connect).
 WIFI_SOCKET_SESSION_TIMEOUT_S = 600
@@ -76,7 +75,6 @@ class AppController:
             logger.info("[MEM] Pre-allocated file transfer buffer: 2KB")
             return True
         except (MemoryError, Exception) as e:
-            print_exception()
             logger.error(f"[MEM] Failed to allocate file transfer buffer: {e}")
             self.file_transfer_buffer = None
             return False
@@ -115,7 +113,6 @@ class AppController:
             self.wifi_nic.disconnect()
             self.wifi_nic.active(False)
         except Exception as e:
-            print_exception()
             print(f"Error closing socket: {e}")
             pass
         self.wifi_nic = None
@@ -153,7 +150,6 @@ class AppController:
                 self.wifi_nic.active(False)
                 await asyncio.sleep(1)
             except Exception:
-                print_exception()
                 pass
 
             self.wifi_nic.active(True)
@@ -185,7 +181,6 @@ class AppController:
             return False
 
         except Exception as e:
-            print_exception()
             logger.error(f"[WIFI] init error: {e}")
             
             if self.wifi_nic is not None:
@@ -193,7 +188,6 @@ class AppController:
                     self.wifi_nic.disconnect()
                     self.wifi_nic.active(False)
                 except Exception:
-                    print_exception()
                     pass
             return False
 
@@ -205,12 +199,10 @@ class AppController:
         try:
             self.wifi_socket.shutdown(socket.SHUT_RDWR)
         except Exception as e:
-            print_exception()
             logger.error(f"[WIFI] Error shutting down socket: {e}")
         try:
             self.wifi_socket.close()
         except Exception as e:
-            print_exception()
             logger.error(f"[WIFI] Error closing socket: {e}")
         self.wifi_socket = None
         self._wifi_session_deadline = None
@@ -231,7 +223,6 @@ class AppController:
             self.wifi_socket.sendall(data)
             return True, self.wifi_socket
         except OSError as e:
-            print_exception()
             errno_val = getattr(e, "errno", None)
             if errno_val in (104, 107, 116):
                 print(f"Connection error during send: {e}")
@@ -241,7 +232,6 @@ class AppController:
                 print(f"OSError during send: {e}")
                 return True, self.wifi_socket
         except Exception as e:
-            print_exception()
             error_str = str(e)
             if "timeout" in error_str.lower() or "lwip" in error_str.lower():
                 print(f"Non-fatal error (ignoring): {e}")
@@ -347,7 +337,6 @@ class AppController:
                         )
                         await asyncio.sleep(disconnected_check_interval)
             except Exception as e:
-                print_exception()
                 self.cont_wifi_fail_count += 1
                 self.cont_socket_fail_count += 1
                 logger.error(f"[WIFI] Error in WiFi connection monitoring: {e}")
@@ -400,7 +389,6 @@ class AppController:
                     new_socket = sock
                     break
                 except Exception as e:
-                    print_exception()
                     print(f"Connection attempt {attempt + 1} failed: {e}")
                     if attempt < max_retries - 1:
                         asyncio.sleep(1)
@@ -427,7 +415,6 @@ class AppController:
             self._wifi_session_deadline = None
             return False
         except Exception as e:
-            print_exception()
             print(f"ERROR - Failed to initialize WiFi communication: {e}")
             self.wifi_socket = None
             self._wifi_session_deadline = None
@@ -585,7 +572,6 @@ class AppController:
                                     break
 
                     except Exception as e:
-                        print_exception()
                         print(f"[WIFI_READ] Error processing data: {e}")
                         self._message_buffer = ""
 
@@ -600,7 +586,6 @@ class AppController:
                         await asyncio.sleep(0.05)
 
             except OSError as e:
-                print_exception()
                 errno_val = getattr(e, "errno", None)
                 if errno_val == 116:
                     self.recv_timeout = 0.1
@@ -617,7 +602,6 @@ class AppController:
                     self.recv_timeout = 0.1
                     await asyncio.sleep(0.5)
             except Exception as e:
-                print_exception()
                 print(f"[WIFI_READ] Unexpected error: {e}")
                 self.recv_timeout = 0.1
                 await asyncio.sleep(0.5)
@@ -647,7 +631,6 @@ class AppController:
             os.listdir("/sdcard")
             return "/sdcard"
         except OSError:
-            print_exception()
             return "/flash"
 
     def _handle_start_file_transfer(self, message):
@@ -663,7 +646,6 @@ class AppController:
             try:
                 self._file_transfer_state["file_handle"].close()
             except Exception:
-                print_exception()
                 pass
 
         root = self._get_file_save_root()
@@ -684,7 +666,6 @@ class AppController:
                 f"({no_of_chunks} chunks expected)"
             )
         except Exception as e:
-            print_exception()
             logger.error(f"[FILE_RECV] Failed to open file for write: {e}")
             self._file_transfer_state = None
 
@@ -712,7 +693,6 @@ class AppController:
                 f"{self._file_transfer_state['expected_chunks']}"
             )
         except Exception as e:
-            print_exception()
             logger.error(f"[FILE_RECV] Failed to decode chunk {chunk_index}: {e}")
 
     def _handle_end_file_transfer(self):
@@ -740,7 +720,6 @@ class AppController:
                 try:
                     os.sync()
                 except (OSError, AttributeError):
-                    print_exception()
                     pass
 
             if received_chunks == expected_chunks:
@@ -769,7 +748,6 @@ class AppController:
                 try:
                     os.sync()
                 except (OSError, AttributeError):
-                    print_exception()
                     pass
                 asyncio.sleep(0.5)
                 machine.reset()
@@ -793,7 +771,6 @@ class AppController:
                 self.recv_timeout = 0.1
                 self._file_transfer_state = None
         except Exception as e:
-            print_exception()
             logger.error(f"[FILE_RECV] Failed to close/save file: {e}")
 
     # -------------------------------------------------------------------------
@@ -812,7 +789,6 @@ class AppController:
                 os.listdir("/sdcard")
                 FS_ROOT = "/sdcard"
             except OSError:
-                print_exception()
                 FS_ROOT = "/flash"
 
             log_path = f"{FS_ROOT}/logs/{filename}"
@@ -862,7 +838,6 @@ class AppController:
             }
             self.send_data_to_app(end_msg, 0.5)
         except Exception as e:
-            print_exception()
             logger.error(f"[WIFI] Failed to stream log file '{log_path}': {e}")
 
     # -------------------------------------------------------------------------
@@ -921,7 +896,6 @@ class AppController:
             loop = asyncio.get_event_loop()
             loop.create_task(_run_check())
         except Exception as e:
-            print_exception()
             logger.error(f"radio_check failed to schedule task: {e}")
 
     # -------------------------------------------------------------------------
@@ -1003,7 +977,6 @@ class AppController:
             return True
 
         except (OSError, MemoryError, Exception) as e:
-            print_exception()
             error_msg = f"Transfer failed: {str(e)}"
             if isinstance(e, OSError):
                 error_msg = f"File error: {str(e)}"
@@ -1047,7 +1020,6 @@ class AppController:
                 else:
                     self.create_and_send_message("verify_internet", {"message": f"upload failed after {upload_duration:.3f} seconds", "result": "fail"}, timeout=0.5)
             except Exception as e:
-                print_exception()
                 self.create_and_send_message("verify_internet", {"message": f"upload error: {e}", "result": "fail"}, timeout=0.5)
         finally:
             pass
@@ -1059,7 +1031,6 @@ class AppController:
             if not check_network_result:
                 self.create_and_send_message("check_network", {"message": "Network scan failed", "result": "fail"}, timeout=0.5)
         except Exception as e:
-            print_exception()
             self.create_and_send_message("check_network", {"message": f"Network scan failed: {e}", "result": "fail"}, timeout=0.5)
 
     async def _get_internet_module_status(self):
@@ -1073,7 +1044,6 @@ class AppController:
                 get_cc_enabled_result = self.apphandler.get_cc_enabled()
                 self.create_and_send_message("get_internet_module_status", {"message": "Module status succeeded", "result": "pass", "cc_enabled": get_cc_enabled_result}, timeout=0.5)
         except Exception as e:
-            print_exception()
             self.create_and_send_message("get_internet_module_status", {"message": f"Module status failed: {e}", "result": "fail"}, timeout=0.5)
     # -------------------------------------------------------------------------
     # Message / command handling
@@ -1085,7 +1055,6 @@ class AppController:
         try:
             self.create_and_send_message("log", line, timeout=0.5)
         except Exception:
-            print_exception()
             pass
 
     def get_recent_logs(self):
@@ -1129,14 +1098,12 @@ class AppController:
             try:
                 asyncio.create_task(self._get_internet_module_status())
             except Exception as e:
-                print_exception()
                 print(f"[verify_internet] Failed to create task: {e}")
         elif command == "try_create_cc":
             logger.info(f"received command: {message}")
             try:
                 asyncio.create_task(self._try_internet_establish(force_upload=True))
             except Exception as e:
-                print_exception()
                 logger.error(f"[try_create_cc] Failed to create task: {e}")
         elif command == "check_network":
             logger.info(f"received command: {message}")
@@ -1153,7 +1120,6 @@ class AppController:
             try:
                 asyncio.create_task(self.apphandler.send_image_to_app())
             except Exception as e:
-                print_exception()
                 logger.error(f"[VERIFY_IMAGE] Failed to create task: {e}")
         elif command == "set_cc_enabled":
             logger.info(f"received command: {message}")
@@ -1231,7 +1197,6 @@ class AppController:
                     msg = ujson.loads(line)
                     messages.append(msg)
                 except Exception as e:
-                    print_exception()
                     print(f"[WIFI_READ] Failed to parse JSON line: {e}")
                     print(f"[WIFI_READ] Problematic line: {line[:100]}...")
 

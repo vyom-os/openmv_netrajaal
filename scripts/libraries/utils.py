@@ -1,20 +1,7 @@
 import struct
-import sys
 import gc
 import utime
 import machine
-
-
-def print_exception(exc=None):
-    """Print a traceback. Swallows its own errors so a handler's recovery is unchanged."""
-    try:
-        if exc is None:
-            exc_info = sys.exc_info()
-            exc = exc_info[1] if exc_info else None
-        if exc is not None:
-            sys.print_exception(exc)
-    except Exception:
-        pass
 
 # Binary header prepended to JPEG bytes before base64 upload (API strips first N bytes).
 # 2-byte LE payload length + 20-byte payload (lat, lon, epoch, image_id, type).
@@ -46,7 +33,6 @@ def _lat_lon_to_micro_deg_int(coord):
     try:
         x = float(coord)
     except (TypeError, ValueError):
-        print_exception()
         x = 0.0
     x = round(x, 6)
     micro = int(round(x * 1_000_000))
@@ -106,10 +92,8 @@ def get_free_memory():
         gc.collect()
         free_bytes = gc.mem_free()
     except AttributeError:
-        print_exception()
         free_bytes = -1
     except Exception:
-        print_exception()
         free_bytes = -1
 
     if free_bytes < 0:
@@ -125,7 +109,6 @@ def get_uptime_minutes():
     try:
         return utime.ticks_ms() // 60000
     except Exception:
-        print_exception()
         return 0
 
 def get_uptime_seconds():
@@ -136,7 +119,6 @@ def get_uptime_seconds():
     try:
         return utime.ticks_ms() // 1000
     except Exception:
-        print_exception()
         return 0
 
 

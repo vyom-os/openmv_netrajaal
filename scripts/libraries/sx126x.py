@@ -1,7 +1,6 @@
 from _sx126x import *
 from machine import SPI, Pin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
-from utils import print_exception
 
 class SX126X:
 
@@ -14,7 +13,6 @@ class SX126X:
                          bits=8, firstbit=SPI.MSB)
         except:
             # Try OpenMV RT1062 format with init() method (alternative approach)
-            print_exception()
             self.spi = SPI(spi_bus)
             self.spi.init(baudrate=spi_baudrate, polarity=spi_polarity, phase=spi_phase,
                         bits=8, firstbit=SPI.MSB)
@@ -348,11 +346,9 @@ class SX126X:
         try:
             self.irq.irq(handler=None)
         except Exception:
-            print_exception()
             try:
                 self.irq.irq(trigger=0, handler=None)
             except Exception:
-                print_exception()
                 pass
         self.irq = Pin(self._irq, mode=Pin.IN)
 
@@ -435,7 +431,6 @@ class SX126X:
         try:
             self.startReceiveCommon()
         except Exception:
-            print_exception()
             pass
         rx = self.setRx(timeout)
         return rx if (state == ERR_UNKNOWN or rx != ERR_NONE) else state
@@ -539,7 +534,6 @@ class SX126X:
         try:
             self._bw = switch[bw_div2]
         except:
-            print_exception()
             return ERR_INVALID_BANDWIDTH
 
         self._bwKhz = bw

@@ -9,7 +9,6 @@ from machine import UART
 import config
 import logger
 from clock_utils import get_epoch_ms
-from utils import print_exception
 
 # Configuration
 UART_ID = 1
@@ -73,7 +72,6 @@ class GPSDriver:
                     resp_text = resp_preview.decode('ascii')
                     # logger.debug(f"[GPS] Response: {resp_text}")
                 except:
-                    print_exception()
                     logger.info(f"[GPS] Response: {len(resp)} bytes (decode failed)")
                 return resp
             elif attempt < retry - 1:
@@ -185,7 +183,6 @@ class GPSDriver:
         try:
             text = resp.decode("ascii")
         except:
-            print_exception()
             return None, None, None
         
         if "+CME ERROR" in text:
@@ -229,7 +226,6 @@ class GPSDriver:
 
                 return lat, lon, timestr
             except (ValueError, IndexError, TypeError) as e:
-                print_exception()
                 logger.warning(f"[GPS] Parse error for line: {e}")
                 continue
    # logger.debug("[GPS] Module responding to AT")
@@ -255,6 +251,5 @@ class GPSDriver:
             # yearday: day of year (can be 0 for now)
             return (int(yyyy), int(mm), int(dd), 0, int(hh), int(mm_sec), int(ss), 0)
         except Exception as e:
-            print_exception()
             logger.error(f"[GPS] Failed to parse time string '{time_str}': {e}")
             return None
