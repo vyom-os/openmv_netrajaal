@@ -222,8 +222,7 @@ jobs:
         name: ${{ steps.rel.outputs.version }}
         files: firmware_*.zip
         body: ${{ steps.rel.outputs.notes }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: '🧹 Remove artifacts'
       uses: geekyeggo/delete-artifact@v6
@@ -267,13 +266,13 @@ jobs:
         } >> "$GITHUB_OUTPUT"
 
     - name: '🧹 Delete old release'
-      uses: dev-drprasad/delete-tag-and-release@v1.1
-      continue-on-error: true
-      with:
-        delete_release: true
-        tag_name: v${{ steps.rel.outputs.version }}
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        tag="v${{ steps.rel.outputs.version }}"
+        if gh release view "$tag" >/dev/null 2>&1; then
+          gh release delete "$tag" --yes --cleanup-tag
+        fi
 
     - name: '🔥 Create development release'
       uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
@@ -284,8 +283,7 @@ jobs:
         target_commitish: ${{ github.event.pull_request.head.sha || github.sha }}
         body: ${{ steps.rel.outputs.notes }}
         files: firmware/firmware_*.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: '🧹 Remove artifacts'
       uses: geekyeggo/delete-artifact@v6
