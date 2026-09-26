@@ -4,8 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
-    branches:    
+    branches:
       - 'master'
+      - 'prod'
     paths:
       - '**'
       - '.github/workflows/*.yml'
@@ -21,6 +22,7 @@ on:
   pull_request:
     branches:
       - 'master'
+      - 'prod'
     paths:
       - '**'
       - '.github/workflows/*.yml'
@@ -184,6 +186,9 @@ jobs:
   stable-release:
     needs: build-firmware
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
     - name: '⏳ Checkout repository'
@@ -197,23 +202,26 @@ jobs:
         path: firmware
 
     - name: '📦 Package firmware'
-      run: source tools/ci.sh && ci_package_firmware_release ${{github.ref_name}}
-
-    - name: "✏️ Generate release changelog"
-      id: changelog
-      uses: mikepenz/release-changelog-builder-action@v6
-      with:
-        toTag: ${{ github.sha }}
-        configuration: '.github/workflows/changelog.json'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      id: rel
+      run: |
+        source tools/ci.sh && ci_package_firmware_release ${{github.ref_name}}
+        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        echo "version=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes<<NOTES"
+          git log -1 --format='%B'
+          echo "NOTES"
+        } >> "$GITHUB_OUTPUT"
 
     - name: '🔥 Create stable release'
       uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
       with:
         draft: true
+        name: ${{ steps.rel.outputs.version }}
         files: firmware_*.zip
-        body: ${{steps.changelog.outputs.changelog}}
+        body: ${{ steps.rel.outputs.notes }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -226,7 +234,7 @@ jobs:
   development-release:
     needs: build-firmware
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') == false
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') == false)
     permissions:
       contents: write
     steps:
@@ -234,29 +242,36 @@ jobs:
       uses: actions/checkout@v6
       with:
         submodules: false
+        fetch-depth: 1
 
     - name: '↓ Download artifacts'
       uses: actions/download-artifact@v8
       with:
         path: firmware
+        pattern: '*RT1062FIRMWARE*'
 
     - name: '📦 Package firmware'
-      run: source tools/ci.sh && ci_package_firmware_development
+      id: rel
+      run: |
+        source tools/ci.sh && ci_package_firmware_development
+        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        sha="${{ github.event.pull_request.head.sha || github.sha }}"
+        git fetch --depth=1 origin "$sha"
+        echo "version=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes<<NOTES"
+          git log -1 --format='%B' "$sha"
+          echo "NOTES"
+        } >> "$GITHUB_OUTPUT"
 
     - name: '🧹 Delete old release'
       uses: dev-drprasad/delete-tag-and-release@v1.1
+      continue-on-error: true
       with:
         delete_release: true
-        tag_name: development
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: "✏️ Generate release changelog"
-      id: changelog
-      uses: mikepenz/release-changelog-builder-action@v6
-      with:
-        toTag: ${{ github.sha }}
-        configuration: '.github/workflows/changelog.json'
+        tag_name: v${{ steps.rel.outputs.version }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -264,11 +279,10 @@ jobs:
       uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
       with:
         draft: false
-        name: Development Release
-        tag_name: development
-        body: |
-            **⚠️ This is a development release, and it may be unstable.**
-            ${{steps.changelog.outputs.changelog}}
+        name: ${{ steps.rel.outputs.version }}
+        tag_name: v${{ steps.rel.outputs.version }}
+        target_commitish: ${{ github.event.pull_request.head.sha || github.sha }}
+        body: ${{ steps.rel.outputs.notes }}
         files: firmware/firmware_*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
