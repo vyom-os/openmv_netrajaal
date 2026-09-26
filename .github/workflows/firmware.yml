@@ -183,57 +183,10 @@ jobs:
         path: ${{ github.event.pull_request.number }}.md
         if-no-files-found: error
 
-  stable-release:
-    needs: build-firmware
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      pull-requests: read
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    steps:
-    - name: '⏳ Checkout repository'
-      uses: actions/checkout@v6
-      with:
-        submodules: false
-
-    - name: '↓ Download artifacts'
-      uses: actions/download-artifact@v8
-      with:
-        path: firmware
-
-    - name: '📦 Package firmware'
-      id: rel
-      run: |
-        source tools/ci.sh && ci_package_firmware_release ${{github.ref_name}}
-        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
-        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
-        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
-        echo "version=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
-        {
-          echo "notes<<NOTES"
-          git log -1 --format='%B'
-          echo "NOTES"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: '🔥 Create stable release'
-      uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
-      with:
-        draft: true
-        name: ${{ steps.rel.outputs.version }}
-        files: firmware_*.zip
-        body: ${{ steps.rel.outputs.notes }}
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: '🧹 Remove artifacts'
-      uses: geekyeggo/delete-artifact@v6
-      with:
-        name: firmware
-        failOnError: false
-
   development-release:
     needs: build-firmware
     runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') == false)
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     permissions:
       contents: write
     steps:
