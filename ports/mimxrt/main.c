@@ -74,17 +74,6 @@
 
 extern void vyomos_fs_mount(void);
 
-// #region agent log
-static void vydbg_main(const char *msg) {
-    mp_printf(MP_PYTHON_PRINTER, "VYDBG %s\n", msg);
-    if (tusb_inited()) {
-        for (int i = 0; i < 300; i++) {
-            tud_task();
-        }
-    }
-}
-// #endregion
-
 int main(void) {
     bool first_soft_reset = true;
 
@@ -157,14 +146,8 @@ soft_reset:
     }
     #endif
 
-    // #region agent log
-    vydbg_main("before-boot-script");
-    // #endregion
     // Execute _boot.py to set up the filesystem.
     pyexec_frozen_module("_boot.py", false);
-    // #region agent log
-    vydbg_main("after-boot-script");
-    // #endregion
 
     // Set the USB medium to flash block device.
     mimxrt_msc_medium = &mimxrt_flash_type;
@@ -182,24 +165,11 @@ soft_reset:
         tusb_init();
     }
 
-    // #region agent log
-    for (int i = 0; i < 3000; i++) {
-        tud_task();
-        mp_hal_delay_ms(1);
-    }
-    vydbg_main("before-vyomos");
-    // #endregion
     vyomos_fs_mount();
-    // #region agent log
-    vydbg_main("after-vyomos");
-    // #endregion
 
     // Initialize OpenMV protocol
     omv_protocol_init_default();
 
-    // #region agent log
-    vydbg_main("before-boot.py");
-    // #endregion
     // Run boot.py every reset and main.py on first soft-reset
     if (pyexec_file_if_exists("boot.py") && first_soft_reset) {
         pyexec_file_if_exists("main.py");
