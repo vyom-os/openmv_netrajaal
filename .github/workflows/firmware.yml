@@ -98,11 +98,19 @@ jobs:
       if: matrix.fvp
       run: source tools/ci.sh && ci_run_fvp_tests ${{ matrix.target }}
 
+    - name: 'Read firmware name'
+      id: fw
+      run: |
+        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        echo "name=$(LC_ALL=C date -u +%d_%b)_RT1062FIRMWARE_${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+
     - name: '⬆ Upload artifacts'
       if: matrix.artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ matrix.target }}
+        name: ${{ steps.fw.outputs.name }}
         path: ${{ matrix.target }}
         if-no-files-found: error
 
