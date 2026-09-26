@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import gc
 import hashlib
 import os
@@ -701,3 +702,86 @@ class DbStore(StoreUtils):
     def clear_image_list(self):
         # TODO akash, make it
         return True
+
+
+# /vyomos/log.txt. No lock, and /vyomos is not created here.
+LOG_PATH = "/vyomos/log.txt"
+LOG_TMP_PATH = "/vyomos/log.tmp"
+LOG_OLD_PATH = "/vyomos/log.txt.old"
+
+LOG_MAX_BYTES = 3 * 1024 * 1024
+LOG_DROP_BYTES = 1 * 1024 * 1024
+LOG_CHUNK_BYTES = 4096
+LOG_NEWLINE_SCAN_BYTES = 256
+
+
+def _log_file_size():
+    try:
+        return os.stat(LOG_PATH)[6]
+    except OSError as e:
+        if e.args and e.args[0] == errno.ENOENT:
+            return 0
+        raise
+
+
+def _append_log_line(line):
+    with open(LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
+def _keep_newer_tail():
+    try:
+        os.remove(LOG_TMP_PATH)
+    except OSError as e:
+        if not e.args or e.args[0] != errno.ENOENT:
+            raise
+
+    with open(LOG_PATH, "rb") as src:
+        src.seek(LOG_DROP_BYTES)
+        window = src.read(LOG_NEWLINE_SCAN_BYTES)
+        newline_at = window.find(b"\n")
+        if newline_at >= 0:
+            pending = window[newline_at + 1:]
+        else:
+            pending = window
+        with open(LOG_TMP_PATH, "wb") as dst:
+            dst.write(pending)
+            while True:
+                chunk = src.read(LOG_CHUNK_BYTES)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+    os.rename(LOG_PATH, LOG_OLD_PATH)
+    try:
+        os.rename(LOG_TMP_PATH, LOG_PATH)
+    except Exception:
+        os.rename(LOG_OLD_PATH, LOG_PATH)
+        raise
+    try:
+        os.remove(LOG_OLD_PATH)
+    except Exception:
+        pass
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+
+def _trim_log_file():
+    while True:
+        size = _log_file_size()
+        if size < LOG_MAX_BYTES:
+            return
+        if size <= LOG_DROP_BYTES:
+            os.remove(LOG_PATH)
+            return
+        _keep_newer_tail()
+        new_size = _log_file_size()
+        if new_size >= size:
+            return
+
+
+def append_log_line(line):
+    _append_log_line(line)
+    _trim_log_file()

@@ -100,7 +100,11 @@ def main_1():
     ok_2026 = set_device_epoch_ms(target_2026_ms)
     pass_2026 = _check("2) set 2026", target_2026_ms, ok_2026, get_epoch_ms())
 
-    print("======== {} ========".format("TEST PASSED" if pass_2024 and pass_2026 else "TEST FAILED"))
+    print(
+        "======== {} ========".format(
+            "TEST PASSED" if pass_2024 and pass_2026 else "TEST FAILED"
+        )
+    )
 
 
 def main_2():

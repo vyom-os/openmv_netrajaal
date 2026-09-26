@@ -299,7 +299,7 @@ async def init_device():
         db_store = DbStore(PROCESS_ID_STR, my_addr)
         logger.info(f"[INIT] DbStore initialized for process {PROCESS_ID_STR}")
     except Exception as e:
-        logger.error(f"[INIT] Failed to initialize DbStore: {e}")
+        logger.error(f"EXCP_ERR: [INIT] Failed to initialize DbStore: {e}")
         sys.print_exception(e)
         return False
     logger.info(
@@ -329,12 +329,12 @@ def init_file_recompile_buffer():
         logger.info(f"[MEM] Pre-allocated file recompile buffer: {len(IMAGE_RECOMPILE_BUFFER)/1024:.1f}KB")
         return True
     except MemoryError as e:
-        logger.error(f"[MEM] Failed to allocate file recompile buffer: {e}")
+        logger.error(f"EXCP_ERR: [MEM] Failed to allocate file recompile buffer: {e}")
         sys.print_exception(e)
         IMAGE_RECOMPILE_BUFFER = None
         return False
     except Exception as e:
-        logger.error(f"[MEM] Error allocating file recompile buffer: {e}")
+        logger.error(f"EXCP_ERR: [MEM] Error allocating file recompile buffer: {e}")
         sys.print_exception(e)
         IMAGE_RECOMPILE_BUFFER = None
         return False
@@ -350,12 +350,12 @@ def init_chunk_storage_buffer():
         )
         return True
     except MemoryError as e:
-        logger.error(f"[MEM] Failed to allocate chunk storage buffer: {e}")
+        logger.error(f"EXCP_ERR: [MEM] Failed to allocate chunk storage buffer: {e}")
         sys.print_exception(e)
         CHUNK_STORAGE_BUFFER = None
         return False
     except Exception as e:
-        logger.error(f"[MEM] Error allocating chunk storage buffer: {e}")
+        logger.error(f"EXCP_ERR: [MEM] Error allocating chunk storage buffer: {e}")
         sys.print_exception(e)
         CHUNK_STORAGE_BUFFER = None
         return False
@@ -396,6 +396,7 @@ async def reboot_device():
         print("REBOOTING DEVICE\n\n")
         machine.reset()
     except Exception as e: # Fail safe reboot
+        logger.error(f"EXCP_ERR: [REBOOT] Error in reboot_device: {e}, rebooting ...")
         sys.print_exception(e)
         machine.reset()
 
@@ -508,7 +509,7 @@ def parse_header(databytes):
             return (True, msg_uid, msg_typ, creator, sender, receiver, msgbytes)
     except Exception as e:
         radio_recd_err_count += 1
-        logger.error(f"[RECV] error parsing header: {databytes[:HEADER_LEN]} : {e}")
+        logger.error(f"EXCP_ERR: [RECV] error parsing header: {databytes[:HEADER_LEN]} : {e}")
         sys.print_exception(e)
         return (False, None, None, None, None, None, None)
 
@@ -609,7 +610,7 @@ async def keep_transmode_lock(device_id, filedata_id):
                 break
     except Exception as e:
         logger.error(
-            f"[IMG] TRANS MODE loop error, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, error={e}"
+            f"EXCP_ERR: [IMG] TRANS MODE loop error, device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, error={e}"
         )
         sys.print_exception(e)
     finally:
@@ -733,7 +734,7 @@ async def keep_restmode_lock():
                 break
     except Exception as e:
         logger.error(
-            f"[IMG] REST MODE loop error, error={e}"
+            f"EXCP_ERR: [IMG] REST MODE loop error, error={e}"
         )
         sys.print_exception(e)
     finally:
@@ -818,7 +819,7 @@ async def init_lora():
             try:
                 loranode.clearDio1Action()
             except Exception as e:
-                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                logger.error(f"EXCP_ERR: [LORA] Error clearing DIO1 action: {e}")
                 sys.print_exception(e)
         else:
             loranode = SX1262(
@@ -859,7 +860,7 @@ async def init_lora():
             try:
                 loranode.clearDio1Action()
             except Exception as e:
-                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                logger.error(f"EXCP_ERR: [LORA] Error clearing DIO1 action: {e}")
                 sys.print_exception(e)
             return False
 
@@ -869,13 +870,13 @@ async def init_lora():
         logger.info(f"[LORA] ✔✔✔ LoRa SX1262 initialized successfully")
         return True
     except Exception as e:
-        logger.error(f"[LORA] ✘✘✘ Exception during initialization: {str(e)}")
+        logger.error(f"EXCP_ERR: [LORA] ✘✘✘ Exception during initialization: {str(e)}")
         sys.print_exception(e)
         if loranode is not None:
             try:
                 loranode.clearDio1Action()
             except Exception as e:
-                logger.error(f"[LORA] Error clearing DIO1 action: {e}")
+                logger.error(f"EXCP_ERR: [LORA] Error clearing DIO1 action: {e}")
                 sys.print_exception(e)
         return False
     finally:
@@ -920,7 +921,7 @@ async def recover_lora(reason):
             snapshot_radio_health_window()
         return succ
     except Exception as e:
-        logger.error(f"[LORA] ✘✘✘ Error recovering LoRa: {e}")
+        logger.error(f"EXCP_ERR: [LORA] ✘✘✘ Error recovering LoRa: {e}")
         sys.print_exception(e)
         return False
 
@@ -947,7 +948,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             )
             loranode.startReceive()
         except Exception as e:
-            logger.error(f"[LORA] Error clearing IRQ status: {e}")
+            logger.error(f"EXCP_ERR: [LORA] Error clearing IRQ status: {e}")
             sys.print_exception(e)
         return
 
@@ -966,13 +967,13 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
                 logger.warning(f"[LORA] Interrupt fired but previous packet not processed yet - this packet is skipped")
         except Exception as e:
             radio_recd_err_count += 1
-            logger.error(f"[LORA] Error reading packet in interrupt callback: {e}")
+            logger.error(f"EXCP_ERR: [LORA] Error reading packet in interrupt callback: {e}")
             sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
                 loranode.startReceive()
             except Exception as e:
-                logger.error(f"[LORA] Error clearing interrupt status: {e}")
+                logger.error(f"EXCP_ERR: [LORA] Error clearing interrupt status: {e}")
                 sys.print_exception(e)
     # elif events & ERR_UNKNOWN:
     #     radio_recd_err_count += 10  # to make reset faster
@@ -985,13 +986,13 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             loranode.clearIrqStatus(SX126X_IRQ_TIMEOUT)
             loranode.startReceive()
         except Exception as e:
-            logger.error(f"[LORA] Error handling timeout in interrupt callback: {e}")
+            logger.error(f"EXCP_ERR: [LORA] Error handling timeout in interrupt callback: {e}")
             sys.print_exception(e)
             try:
                 loranode.clearIrqStatus(SX126X_IRQ_ALL)
                 loranode.startReceive()
             except Exception as e:
-                logger.error(f"[LORA] Error clearing interrupt status: {e}")
+                logger.error(f"EXCP_ERR: [LORA] Error clearing interrupt status: {e}")
                 sys.print_exception(e)
     elif events & SX126X_IRQ_TX_DONE:
         # SX126x returns to standby after TX. _onIRQ already called startReceive(),
@@ -1003,7 +1004,7 @@ def lora_event_callback(events): # TODO Anand, merge radio_read into this functi
             loranode.clearIrqStatus(SX126X_IRQ_ALL)
             loranode.startReceive()
         except Exception as e:
-            logger.error(f"[LORA] Error clearing interrupt status: {e}")
+            logger.error(f"EXCP_ERR: [LORA] Error clearing interrupt status: {e}")
             sys.print_exception(e)
 
 
@@ -1078,6 +1079,7 @@ async def lora_health_monitor():  # is_lora_ready is not being used
                 )
                 await asyncio.sleep(RADIO_HEALTH_INTERVAL)
         except Exception as e:
+            logger.error(f"EXCP_ERR: [LORA] Error in health monitor: {e}")
             sys.print_exception(e)
             await recover_lora(f"health monitor exception: {e}")
             await asyncio.sleep(RADIO_HEALTH_INTERVAL)
@@ -1159,7 +1161,7 @@ async def radio_read(): # TODO Anand, merge
             lora_rx_rssi = None
             lora_rx_snr = None
             lora_rx_event.clear()
-            logger.fatal(f"[LORA] Exception in radio_read: {e}")
+            logger.fatal(f"EXCP_ERR: [LORA] Exception in radio_read: {e}")
             sys.print_exception(e)
             await asyncio.sleep(0.1)  # Brief pause on error
 
@@ -1196,7 +1198,7 @@ async def process_packet_queue(): # TODO Anand, (no change)
                                     i_chunk_index = i
                                     break
                         except Exception as e:
-                            logger.error(f"[QUEUE] Error parsing packet: {e}")
+                            logger.error(f"EXCP_ERR: [QUEUE] Error parsing packet: {e}")
                             sys.print_exception(e)
 
                     # If I chunk found, process it first; otherwise process first packet
@@ -1216,7 +1218,7 @@ async def process_packet_queue(): # TODO Anand, (no change)
                 await asyncio.sleep(0.01)
 
         except Exception as e:
-            logger.error(f"[QUEUE] Error processing packet from queue: {e}")
+            logger.error(f"EXCP_ERR: [QUEUE] Error processing packet from queue: {e}")
             sys.print_exception(e)
             await asyncio.sleep(0.1)  # Brief pause on error
 
@@ -1295,7 +1297,7 @@ async def periodic_health_stats_loop():
             logger.info(f"[MEM] ⛃⛃⛃⛁⛁⛁ Cleanup complete (free: {free_after}KB, freed: {freed}KB), img_queued: {img_queued_count}, img_sent: {db_store.get_img_sent_count()}, img_dropped: {db_store.get_img_dropped_count()}, img_failed: {db_store.get_img_failed_count()}, network paths: {len(network_paths)}, seen_neighbours: [{seen_nodes_str}]")
             await asyncio.sleep(MEM_CLEANUP_INTERVAL_SEC)
         except Exception as e:
-            logger.error(f"[MEM] error in memory cleanup: {e}")
+            logger.error(f"EXCP_ERR: [MEM] error in memory cleanup: {e}")
             sys.print_exception(e)
             await asyncio.sleep(MEM_CLEANUP_INTERVAL_SEC)
 
@@ -1382,7 +1384,7 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
         radio_sent_fail_count += 1
         return (False, None, None, None, None, [])
     except Exception as e:
-        logger.fatal(f"[LORA] Exception in send_single_packet: {e}")
+        logger.fatal(f"EXCP_ERR: [LORA] Exception in send_single_packet: {e}")
         sys.print_exception(e)
         radio_sent_fail_count += 1
         return (False, None, None, None, None, [])
@@ -1413,7 +1415,7 @@ def encrypt_if_needed(msg_typ, msg):
             return msgbytes
         return msg
     except Exception as e:
-        logger.error(f"Error in encrypt_if_needed error: {e}")
+        logger.error(f"EXCP_ERR: Error in encrypt_if_needed error: {e}")
         sys.print_exception(e)
         return None
 
@@ -1447,7 +1449,7 @@ async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messa
             logger.error(f"msgbtyes size exceeds the payload body limit, {len(msgbytes)} bytes > {PACKET_BODY_LIMIT} bytes")
             return False, None, None, None, None
     except Exception as e:
-        logger.error(f"[LORA] Exception in send_msg: {e}")
+        logger.error(f"EXCP_ERR: [LORA] Exception in send_msg: {e}")
         sys.print_exception(e)
         return False, None, None, None, None
 
@@ -1564,7 +1566,7 @@ def get_ack_msg_info(msg_uid):
                                 chunk_id = int.from_bytes(payload[i:i+CHUNK_ID_BYTES], "big")
                                 missingids.append(chunk_id)
                         except Exception as e: # failed to parse payload
-                            logger.warning(f"[ACK] Failed to parse missing IDs payload {payload}: {e}")
+                            logger.warning(f"EXCP_ERR: [ACK] Failed to parse missing IDs payload {payload}: {e}")
                             sys.print_exception(e)
                             return (0, None, None, None, None, [])
                 logger.debug(
@@ -1667,7 +1669,7 @@ def add_chunk(msgbytes, rssi=None, snr=None):
             img_chunk_rssi_snr = []
             img_last_logged_received = received
     except Exception as e:
-        logger.error(f"[CHUNK] Error adding chunk: {e}, msgbytes_len={len(msgbytes)}")
+        logger.error(f"EXCP_ERR: [CHUNK] Error adding chunk: {e}, msgbytes_len={len(msgbytes)}")
         sys.print_exception(e)
 
 def get_data_for_chunk_id(chunkiter):
@@ -1730,13 +1732,13 @@ def recompile_msg(filedata_id):
             return memoryview(IMAGE_RECOMPILE_BUFFER)[:total_size]
 
         except MemoryError as e:
-            logger.error(f"[CHUNK] MemoryError in recompile_msg for {filedata_id}: {e}")
+            logger.error(f"EXCP_ERR: [CHUNK] MemoryError in recompile_msg for {filedata_id}: {e}")
             sys.print_exception(e)
             free_mem = get_free_memory()
             logger.info(f"[MEM] Free memory after MemoryError: {free_mem}KB")
             return None
         except Exception as e:
-            logger.error(f"[CHUNK] Exception in recompile_msg for {filedata_id}: {e}")
+            logger.error(f"EXCP_ERR: [CHUNK] Exception in recompile_msg for {filedata_id}: {e}")
             sys.print_exception(e)
             free_mem = get_free_memory()
             logger.info(f"[MEM] Free memory after exception: {free_mem}KB")
@@ -1955,7 +1957,7 @@ async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
 
     except Exception as e:
         app_controller.create_and_send_message("verify_internet", {"message": "Failed to send to cloud via cellular"}, timeout=0.5)
-        logger.error(f"msg_typ:{msg_typ} from node {creator} error sending to cloud via cellular: {e}")
+        logger.error(f"EXCP_ERR: msg_typ:{msg_typ} from node {creator} error sending to cloud via cellular: {e}")
         import sys
         sys.print_exception(e)
         return False
@@ -2008,7 +2010,7 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
                 logger.error(f"{log_tag} can't forwar file msg_typ=[{msg_typ}] because I dont have next device in spath yet")
                 sent_succ = False
         except Exception as e:
-            logger.error(f"{log_tag} unexpected error sending file to next device: {e}")
+            logger.error(f"EXCP_ERR: {log_tag} unexpected error sending file to next device: {e}")
             sys.print_exception(e)
             sent_succ = False
     return sent_succ
@@ -2084,12 +2086,13 @@ async def hb_process(msg_uid, msgbytes, sender):
                 decrypted_msg = enc.decrypt_rsa(msgbytes, encnode.get_prv_key(creator))
                 logger.debug(f"[HB] HB send msg = {decrypted_msg}")
             except Exception as e:
-                logger.error(f"[HB] Failed to decrypt HB message: {e}")
+                logger.error(f"EXCP_ERR: [HB] Failed to decrypt HB message: {e}")
                 sys.print_exception(e)
         else:
             try:
                 logger.info(f"[HB] HB uploading, decoded msg = {msgbytes.decode()}, type={type(msgbytes)}")
             except Exception as e:
+                logger.error(f"EXCP_ERR: [HB] Error decoding HB message: {e}")
                 sys.print_exception(e)
                 try:
                     logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}, type={type(msgbytes)}")
@@ -2148,7 +2151,7 @@ async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
             return False
         return True
     except Exception as e:
-        logger.error(f"[PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
+        logger.error(f"EXCP_ERR: [PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
         sys.print_exception(e)
         img_capture_count -= 1
         return False
@@ -2232,7 +2235,7 @@ def capture_image(compress_quality=None):
 
         return img_snapshot, jpeg_bytearray, event_epoch_ms
     except Exception as e:
-        logger.error(f"[PIR] Failed to capture image: {e}")
+        logger.error(f"EXCP_ERR: [PIR] Failed to capture image: {e}")
         sys.print_exception(e)
         return None, None, None
     finally:
@@ -2306,7 +2309,7 @@ async def person_detection_loop():
                         else:
                             logger.debug("[WARNING] : GPS module is not initialized, skipping GPS location")
                     except Exception as e: # Not falat error
-                        logger.warning(f"[PIR] Failed to get GPS location: {e}")
+                        logger.warning(f"EXCP_ERR: [PIR] Failed to get GPS location: {e}")
                         sys.print_exception(e)
 
                     try:
@@ -2315,7 +2318,7 @@ async def person_detection_loop():
                             lat, lon, event_epoch_ms, image_id, "F"
                         ) + imgbytes
                     except Exception as e:
-                        logger.error(f"[PIR] Failed to pack image meta header: {e}")
+                        logger.error(f"EXCP_ERR: [PIR] Failed to pack image meta header: {e}")
                         sys.print_exception(e)
                         img_capture_count -= 1
                         led.off()
@@ -2326,7 +2329,7 @@ async def person_detection_loop():
                         try:
                             del imgbytes
                         except NameError as e:
-                            logger.error(f"[PIR] Error deleting imgbytes: {e}")
+                            logger.error(f"EXCP_ERR: [PIR] Error deleting imgbytes: {e}")
                             sys.print_exception(e)
                         if enc_msgbytes is None:
                             logger.error("[PIR] encrypt_if_needed returned enc_msgbytes=None")
@@ -2337,7 +2340,7 @@ async def person_detection_loop():
                         asyncio.create_task(_send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst))
 
                     except Exception as e:
-                        logger.error(f"[PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
+                        logger.error(f"EXCP_ERR: [PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}")
                         sys.print_exception(e)
                         img_capture_count -= 1
                         continue
@@ -2347,7 +2350,7 @@ async def person_detection_loop():
                 except Exception as e:
                     led.off()
                     await asyncio.sleep(sleep_in_bursts)
-                    logger.fatal(f"[PIR] unexpected error in image taking and saving for burst {i}: {e}")
+                    logger.fatal(f"EXCP_ERR: [PIR] unexpected error in image taking and saving for burst {i}: {e}")
                     sys.print_exception(e)
                 finally:
                     try:
@@ -2355,12 +2358,12 @@ async def person_detection_loop():
                             del img_snapshot
                             gc.collect()
                     except Exception as e:
-                        logger.warning(f"warning cleaning up image: {e}, can be ignored...")
+                        logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...")
                         sys.print_exception(e)
                     led.off()
             await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
         except Exception as e:
-            logger.error(f"[PIR] unexpected error in event taking and saving: {e}")
+            logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}")
             sys.print_exception(e)
             await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
 
@@ -2442,7 +2445,7 @@ async def image_sending_loop():
                     await asyncio.sleep(IMAGE_SENDING_NEXT_INTERVAL)
 
             except Exception as e:
-                logger.error(f"[IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued")
+                logger.error(f"EXCP_ERR: [IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued")
                 sys.print_exception(e)
                 store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
                 if not store_succ:
@@ -2456,7 +2459,7 @@ async def image_sending_loop():
                     if enc_msgbytes is not None:
                         del enc_msgbytes
                 except Exception as e:
-                    logger.error(f"[IMG] Error deleting enc_msgbytes: {e}")
+                    logger.error(f"EXCP_ERR: [IMG] Error deleting enc_msgbytes: {e}")
                     sys.print_exception(e)
                 gc.collect()
 
@@ -2542,7 +2545,7 @@ def process_message(databytes, rssi=None, snr=None):
                 asyncio.create_task(send_msg("W", my_addr, WAIT_MESSAGE, sender))
                 return False
         except Exception as e:
-            logger.error(f"[CHUNK] decoding unicode {e} : {msgbytes}")
+            logger.error(f"EXCP_ERR: [CHUNK] decoding unicode {e} : {msgbytes}")
             sys.print_exception(e)
             return False
     elif msg_typ == "I":
@@ -2556,7 +2559,7 @@ def process_message(databytes, rssi=None, snr=None):
             else:
                 logger.warning(f"[IMG RX] Chunk I message too short ({len(msgbytes)} bytes), cannot extract filedata_id")
         except Exception as e:
-            logger.error(f"[IMG RX] Error processing chunk I: {e}")
+            logger.error(f"EXCP_ERR: [IMG RX] Error processing chunk I: {e}")
             sys.print_exception(e)
     elif msg_typ == "E": #
         global trans_msg_typ, trans_chunk_md5
@@ -2567,7 +2570,7 @@ def process_message(databytes, rssi=None, snr=None):
         try:
             transfer_completed, missing_bytes, filedata_id, recompiled_msgbytes, epoch_ms = end_chunk(msgbytes.decode()) # TODO later, check how can we validate file
         except Exception as e:
-            logger.error(f"[IMG RX] Error in end_chunk for End chunk: {e}")
+            logger.error(f"EXCP_ERR: [IMG RX] Error in end_chunk for End chunk: {e}")
             sys.print_exception(e)
             return False
         if transfer_completed:
@@ -2583,7 +2586,7 @@ def process_message(databytes, rssi=None, snr=None):
                     else:
                         logger.info(f"[IMG RX] ✔✔✔ [VALID MD5 FILE] for the file got transferred")
                 except Exception as e:
-                    logger.error(f"[IMG RX] Error checking md5 for the file got transferred: {e}")
+                    logger.error(f"EXCP_ERR: [IMG RX] Error checking md5 for the file got transferred: {e}")
                     sys.print_exception(e)
                     del recompiled_msgbytes
                     gc.collect()
@@ -2592,7 +2595,7 @@ def process_message(databytes, rssi=None, snr=None):
                 try:
                     cleanup_chunk_map_by_msg_id(filedata_id)
                 except Exception as e:
-                    logger.error(f"[IMG RX] Error cleaning up chunk map for filedata_id {filedata_id}: {e}")
+                    logger.error(f"EXCP_ERR: [IMG RX] Error cleaning up chunk map for filedata_id {filedata_id}: {e}")
                     sys.print_exception(e)
 
                 try:
@@ -2610,7 +2613,7 @@ def process_message(databytes, rssi=None, snr=None):
                             try:
                                 del recompiled_msgbytes
                             except Exception as e:
-                                logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after send/enqueue fail: {e}")
+                                logger.error(f"EXCP_ERR: [IMG RX] Error deleting recompiled_msgbytes after send/enqueue fail: {e}")
                                 sys.print_exception(e)
                             gc.collect()
                             return
@@ -2627,7 +2630,7 @@ def process_message(databytes, rssi=None, snr=None):
                                     db_store.store_image_raw(epoch_ms, creator, img)
                                     logger.info(f"[IMG RX] Saved raw image: {creator}_{epoch_ms}_raw.jpg: raw size = {len(img_bytes)} bytes")
                                 except Exception as e:
-                                    logger.error(f"[IMG RX] Failed to decrypt/save raw image: {e}")
+                                    logger.error(f"EXCP_ERR: [IMG RX] Failed to decrypt/save raw image: {e}")
                                     sys.print_exception(e)
                                 finally:
                                     if img_bytes is not None:
@@ -2635,12 +2638,12 @@ def process_message(databytes, rssi=None, snr=None):
                                     if img is not None:
                                         del img
                             except Exception as e:
-                                logger.error(f"[IMG RX] Failed to decrypt/save raw image: {e}")
+                                logger.error(f"EXCP_ERR: [IMG RX] Failed to decrypt/save raw image: {e}")
                                 sys.print_exception(e)
                         try:
                             del recompiled_msgbytes
                         except Exception as e:
-                            logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after chunk end: {e}")
+                            logger.error(f"EXCP_ERR: [IMG RX] Error deleting recompiled_msgbytes after chunk end: {e}")
                             sys.print_exception(e)
                         gc.collect()
 
@@ -2660,12 +2663,12 @@ def process_message(databytes, rssi=None, snr=None):
 
                     asyncio.create_task(_chunk_end_send_or_enqueue(trans_msg_typ_copy, trans_chunk_md5_copy))
                 except Exception as e:
-                    logger.error(f"[IMG RX] Error scheduling chunk end (send/enqueue): {e}")
+                    logger.error(f"EXCP_ERR: [IMG RX] Error scheduling chunk end (send/enqueue): {e}")
                     sys.print_exception(e)
                     try:
                         del recompiled_msgbytes
                     except Exception as e:
-                        logger.error(f"[IMG RX] Error deleting recompiled_msgbytes after schedule fail: {e}")
+                        logger.error(f"EXCP_ERR: [IMG RX] Error deleting recompiled_msgbytes after schedule fail: {e}")
                         sys.print_exception(e)
                     gc.collect()
             else:
@@ -2810,7 +2813,7 @@ def build_heartbeat_payload():  # HARD limit is 50 bytes
         hbmsg_bytes += int_to_nbytes(device_uptime, 2)
         return hbmsg_bytes
     except Exception as e:
-        logger.error(f"[HB] Failed to build heartbeat payload: {e}")
+        logger.error(f"EXCP_ERR: [HB] Failed to build heartbeat payload: {e}")
         sys.print_exception(e)
         return build_dummy_heartbeat_payload(VERSION)
 
@@ -2895,14 +2898,14 @@ async def keep_generating_heartbeat():
                     try:
                         await reboot_device()
                     except Exception as e:
-                        logger.error(f"reinitializing LoRa: {e}")
+                        logger.error(f"EXCP_ERR: reinitializing LoRa: {e}")
                         sys.print_exception(e)
             else:
                 consecutive_hb_failures = 0
                 logger.info("[HB] ✔✔✔ HB SUCCESS")
             await asyncio.sleep(HB_WAIT + random.randint(3,10))
         except Exception as e:
-            logger.error(f"error in keep_generating_heartbeat: {str(e)}")
+            logger.error(f"EXCP_ERR: error in keep_generating_heartbeat: {str(e)}")
             consecutive_hb_failures += 1
             sys.print_exception(e)
             await asyncio.sleep(HB_WAIT + random.randint(3,10))
@@ -2953,7 +2956,7 @@ def get_curr_neighbours():
             return []
         return [x.get("node") for x in seen_neighbours if isinstance(x, dict) and "node" in x]
     except Exception as e:
-        logger.error(f"[NET] error in get_curr_neighbours: {e}")
+        logger.error(f"EXCP_ERR: [NET] error in get_curr_neighbours: {e}")
         sys.print_exception(e)
         return []
 
@@ -3019,7 +3022,7 @@ async def network_request_loop():
                     logger.info(f"[NET] - sleeping for {NETWORK_STABLE_SLEEP} seconds, for next network `refresh`")
                     await asyncio.sleep(NETWORK_STABLE_SLEEP)
         except Exception as e:
-            logger.error(f"[NET] error in spath request loop: {e}")
+            logger.error(f"EXCP_ERR: [NET] error in spath request loop: {e}")
             sys.print_exception(e)
             await asyncio.sleep(1)
 
@@ -3046,7 +3049,7 @@ async def network_response_generate(target):
             logger.debug(f"[NET] sending network reponse to :{target}, spth: {new_spath_msg}")
         asyncio.create_task(send_msg("Y", my_addr, new_spath_msg.encode(), target))
     except Exception as e:
-        logger.error(f"[NET] error in network response generation: {e}")
+        logger.error(f"EXCP_ERR: [NET] error in network response generation: {e}")
         sys.print_exception(e)
 
 
@@ -3074,7 +3077,7 @@ async def network_response_consume(msg, sender, rssi, snr):
         msg_str = msg.decode() if isinstance(msg, bytes) else msg
         spath_received = [int(x.strip()) for x in msg_str.split(",")]
     except Exception as e:
-        logger.error(f"Error parsing spath message: '{msg}', error: {e}")
+        logger.error(f"EXCP_ERR: Error parsing spath message: '{msg}', error: {e}")
         sys.print_exception(e)
         return
 
@@ -3117,7 +3120,7 @@ async def keep_updating_gps():
         try:
             gps_module = GPSDriver(uart=tracx_uart)
         except Exception as e:
-            logger.error(f"[GPS] Failed to create GPS driver instance: {e}")
+            logger.error(f"EXCP_ERR: [GPS] Failed to create GPS driver instance: {e}")
             sys.print_exception(e)
             return
 
@@ -3161,7 +3164,7 @@ async def keep_updating_gps():
                         print(f"[RTC] after GPS update: {rtc.datetime()} ({time_str})")
                         logger.info(f"[GPS] RTC updated with GPS time: {time_str}")
                 except Exception as e:
-                    logger.warning(f"[GPS] Failed to update RTC: {e}")
+                    logger.warning(f"EXCP_ERR: [GPS] Failed to update RTC: {e}")
                     sys.print_exception(e)
             else:
                 gps_failure_count += 1
@@ -3178,14 +3181,14 @@ async def keep_updating_gps():
         logger.info("[GPS] One-shot update done; GNSS asleep until next boot")
 
     except Exception as e:
-        logger.error(f"[GPS] error in GPS cycle: {e}")
+        logger.error(f"EXCP_ERR: [GPS] error in GPS cycle: {e}")
         sys.print_exception(e)
         try:
             if gps_module is not None:
                 async with tracx_uart_lock:
                     gps_module.enter_gps_sleep(sleep_module=running_as_unit())
         except Exception as e:
-            logger.error(f"[GPS] Failed to enter sleep after error: {e}")
+            logger.error(f"EXCP_ERR: [GPS] Failed to enter sleep after error: {e}")
             sys.print_exception(e)
 
 # ---------------------------------------------------------------------------
@@ -3277,7 +3280,7 @@ class AppHandler:
             )  # as message is two-way (send + ack)
             return (success_count, success_rate, transfer_rate)
         except Exception as e:
-            logger.error(f"[{my_addr}] : radio connectivity check failed: {e}")
+            logger.error(f"EXCP_ERR: [{my_addr}] : radio connectivity check failed: {e}")
             sys.print_exception(e)
             return (0, 0, 0)
         finally:
@@ -3307,7 +3310,7 @@ class AppHandler:
                 "progress": trans_in_progress,
             }
         except Exception as e:
-            logger.error(f"[APP] error in list_images: {e}")
+            logger.error(f"EXCP_ERR: [APP] error in list_images: {e}")
             sys.print_exception(e)
             return {"queued": [], "sent": [], "failed": [], "progress": False}
 
@@ -3317,7 +3320,7 @@ class AppHandler:
             db_store.clear_image_list()
             return True
         except Exception as e:
-            logger.error(f"[APP] error in clear_all_queue: {e}")
+            logger.error(f"EXCP_ERR: [APP] error in clear_all_queue: {e}")
             sys.print_exception(e)
             return False
 
@@ -3344,7 +3347,7 @@ class AppHandler:
             return bytes(jpeg_bytearray)
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"capture_image_to_verify_camera: {e}", "result": "fail"}, timeout=0.5)
-            logger.error(f"[{type}] capture_image_to_verify_camera: {e} [Fail]")
+            logger.error(f"EXCP_ERR: [{type}] capture_image_to_verify_camera: {e} [Fail]")
             sys.print_exception(e)
             return None
         finally:
@@ -3372,7 +3375,7 @@ class AppHandler:
                 return False
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"Error while Establishing Internet!", "result": "fail"}, timeout=0.5)
-            logger.error(f"[try_create_cc] error in try_create_cc: {e}")
+            logger.error(f"EXCP_ERR: [try_create_cc] error in try_create_cc: {e}")
             sys.print_exception(e)
             return False
     
@@ -3417,7 +3420,7 @@ class AppHandler:
 
         except Exception as e:
             app_controller.create_and_send_message("verify_internet", {"message": f"upload_verify_image_to_server: {e}", "result": "fail"}, timeout=0.5)
-            logger.error(f"[verify_internet] upload_verify_image_to_server: {e}")
+            logger.error(f"EXCP_ERR: [verify_internet] upload_verify_image_to_server: {e}")
             sys.print_exception(e)
             return False
 
@@ -3457,7 +3460,7 @@ class AppHandler:
             return True
 
         except Exception as e:
-            logger.error(f"[verify_image] send_image_to_app error: {e}")
+            logger.error(f"EXCP_ERR: [verify_image] send_image_to_app error: {e}")
             sys.print_exception(e)
             return False
         finally:
@@ -3538,7 +3541,7 @@ async def power_save_loop():
             else:
                 await asyncio.sleep(0.1)
         except Exception as e:
-            logger.warning(f"[PWR] power_save_loop error: {e}")
+            logger.warning(f"EXCP_ERR: [PWR] power_save_loop error: {e}")
             sys.print_exception(e)
             await asyncio.sleep(1)
 
@@ -3618,12 +3621,12 @@ except KeyboardInterrupt as e:
     sys.print_exception(e)
     logger.info("꩜꩜꩜꩜꩜꩜ stopped by user via keyboard interrupt ꩜꩜꩜꩜꩜꩜")
 except Exception as e:
-    logger.fatal(f"Uncaught error in main.py: {str(e)}")
+    logger.fatal(f"EXCP_ERR: Uncaught error in main.py: {str(e)}")
     sys.print_exception(e)
 finally:
     try:
         print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device... ꩜꩜꩜꩜꩜꩜")
         machine.reset()
     except Exception as e:
-        logger.fatal(f"error in restarting the device in main.py: {str(e)}")
+        logger.fatal(f"EXCP_ERR: error in restarting the device in main.py: {str(e)}")
         sys.print_exception(e)
