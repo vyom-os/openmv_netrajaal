@@ -4,8 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
-    branches:    
+    branches:
       - 'master'
+      - 'prod'
     paths:
       - '**'
       - '.github/workflows/*.yml'
@@ -21,6 +22,7 @@ on:
   pull_request:
     branches:
       - 'master'
+      - 'prod'
     paths:
       - '**'
       - '.github/workflows/*.yml'
@@ -40,39 +42,11 @@ jobs:
     strategy:
       matrix:
         target:
-          - OPENMV2
-          - OPENMV3
-          - OPENMV4
-          - OPENMV4P
-          - OPENMVPT
           - OPENMV_RT1060
-          - OPENMV_AE3
-          - OPENMV_N6
-          - ARDUINO_PORTENTA_H7
-          - ARDUINO_GIGA
-          - ARDUINO_NICLA_VISION
         qemu: [false]
         fvp: [false]
         profile: [0]
         artifacts: [true]
-        include:
-          - target: DOCKER
-            qemu: false
-            profile: 0
-            artifacts: false
-          - target: OPENMV_N6
-            qemu: false
-            profile: 1
-            artifacts: false
-          - target: MPS2_AN500
-            qemu: true
-            profile: 0
-            artifacts: false
-          - target: MPS3_AN547
-            qemu: false
-            fvp: true
-            profile: 0
-            artifacts: false
       fail-fast: false
     steps:
     - name: '⏳ Checkout repository'
@@ -126,11 +100,27 @@ jobs:
       if: matrix.fvp
       run: source tools/ci.sh && ci_run_fvp_tests ${{ matrix.target }}
 
+    - name: 'Read firmware name'
+      id: fw
+      run: |
+        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        echo "name=$(LC_ALL=C date -u +%d_%b)_RT1062FIRMWARE_${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+
+    - name: 'Rename firmware files'
+      if: matrix.artifacts
+      run: |
+        name="${{ steps.fw.outputs.name }}"
+        dir="${{ matrix.target }}"
+        mv "$dir/firmware.bin" "$dir/${name}.bin"
+        mv "$dir/firmware.elf" "$dir/${name}.elf"
+
     - name: '⬆ Upload artifacts'
       if: matrix.artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ matrix.target }}
+        name: ${{ steps.fw.outputs.name }}
         path: ${{ matrix.target }}
         if-no-files-found: error
 
@@ -144,12 +134,16 @@ jobs:
       with:
         submodules: false
 
+    - name: 'Read SDK version'
+      id: sdk-ver
+      run: echo "version=$(cat SDK_VERSION)" >> "$GITHUB_OUTPUT"
+
     - name: '♻ Cache SDK'
       uses: actions/cache@v5.0.3
       id: sdk-cache
       with:
-        path: ~/openmv-sdk-1.0.0
-        key: openmv-sdk-1.0.0-linux-x86_64
+        path: ~/openmv-sdk-${{ steps.sdk-ver.outputs.version }}
+        key: openmv-sdk-${{ steps.sdk-ver.outputs.version }}-linux-x86_64
 
     - name: '🛠 Install SDK'
       if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -166,14 +160,19 @@ jobs:
       with:
         repository: 'openmv/openmv'
         tag: 'development'
-        fileName: '*.zip'
+        fileName: 'firmware_OPENMV_RT1060.zip'
         extract: false
         out-file-path: 'old_firmware'
 
     - name: '📝 Generate report'
       run: |
-        SDK_DIR="${HOME}/openmv-sdk-1.0.0"
-        export PATH="${SDK_DIR}/gcc/bin:${SDK_DIR}/python/bin:${PATH}"
+        SDK_DIR="${HOME}/openmv-sdk-${{ steps.sdk-ver.outputs.version }}"
+        export PATH="${SDK_DIR}/gcc/bin:${PATH}"
+        sudo apt-get update
+        sudo apt-get install -y python3-tabulate
+        mkdir -p new_firmware/OPENMV_RT1060
+        elf=$(find new_firmware -name '*.elf' ! -path 'new_firmware/OPENMV_RT1060/*' -print -quit)
+        cp "$elf" new_firmware/OPENMV_RT1060/firmware.elf
         python3 tools/code_size.py > ${GITHUB_WORKSPACE}/${{ github.event.pull_request.number }}.md
 
     - name: '⬆ Upload report'
@@ -184,52 +183,10 @@ jobs:
         path: ${{ github.event.pull_request.number }}.md
         if-no-files-found: error
 
-  stable-release:
-    needs: build-firmware
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    steps:
-    - name: '⏳ Checkout repository'
-      uses: actions/checkout@v6
-      with:
-        submodules: false
-
-    - name: '↓ Download artifacts'
-      uses: actions/download-artifact@v8
-      with:
-        path: firmware
-
-    - name: '📦 Package firmware'
-      run: source tools/ci.sh && ci_package_firmware_release ${{github.ref_name}}
-
-    - name: "✏️ Generate release changelog"
-      id: changelog
-      uses: mikepenz/release-changelog-builder-action@v6
-      with:
-        toTag: ${{ github.sha }}
-        configuration: '.github/workflows/changelog.json'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: '🔥 Create stable release'
-      uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
-      with:
-        draft: true
-        files: firmware_*.zip
-        body: ${{steps.changelog.outputs.changelog}}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: '🧹 Remove artifacts'
-      uses: geekyeggo/delete-artifact@v6
-      with:
-        name: firmware
-        failOnError: false
-
   development-release:
     needs: build-firmware
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') == false
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     permissions:
       contents: write
     steps:
@@ -237,44 +194,49 @@ jobs:
       uses: actions/checkout@v6
       with:
         submodules: false
+        fetch-depth: 1
 
     - name: '↓ Download artifacts'
       uses: actions/download-artifact@v8
       with:
         path: firmware
+        pattern: '*RT1062FIRMWARE*'
 
     - name: '📦 Package firmware'
-      run: source tools/ci.sh && ci_package_firmware_development
+      id: rel
+      run: |
+        source tools/ci.sh && ci_package_firmware_development
+        major=$(sed -n 's/^major = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        minor=$(sed -n 's/^minor = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        patch=$(sed -n 's/^patch = \([0-9]*\).*/\1/p' scripts/libraries/config.py)
+        sha="${{ github.event.pull_request.head.sha || github.sha }}"
+        git fetch --depth=1 origin "$sha"
+        echo "version=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes<<NOTES"
+          git log -1 --format='%B' "$sha"
+          echo "NOTES"
+        } >> "$GITHUB_OUTPUT"
 
     - name: '🧹 Delete old release'
-      uses: dev-drprasad/delete-tag-and-release@v1.1
-      with:
-        delete_release: true
-        tag_name: development
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: "✏️ Generate release changelog"
-      id: changelog
-      uses: mikepenz/release-changelog-builder-action@v6
-      with:
-        toTag: ${{ github.sha }}
-        configuration: '.github/workflows/changelog.json'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        tag="v${{ steps.rel.outputs.version }}"
+        if gh release view "$tag" >/dev/null 2>&1; then
+          gh release delete "$tag" --yes --cleanup-tag
+        fi
 
     - name: '🔥 Create development release'
       uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
       with:
         draft: false
-        name: Development Release
-        tag_name: development
-        body: |
-            **⚠️ This is a development release, and it may be unstable.**
-            ${{steps.changelog.outputs.changelog}}
+        name: ${{ steps.rel.outputs.version }}
+        tag_name: v${{ steps.rel.outputs.version }}
+        target_commitish: ${{ github.event.pull_request.head.sha || github.sha }}
+        body: ${{ steps.rel.outputs.notes }}
         files: firmware/firmware_*.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: '🧹 Remove artifacts'
       uses: geekyeggo/delete-artifact@v6
