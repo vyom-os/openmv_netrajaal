@@ -132,12 +132,16 @@ jobs:
       with:
         submodules: false
 
+    - name: 'Read SDK version'
+      id: sdk-ver
+      run: echo "version=$(cat SDK_VERSION)" >> "$GITHUB_OUTPUT"
+
     - name: '♻ Cache SDK'
       uses: actions/cache@v5.0.3
       id: sdk-cache
       with:
-        path: ~/openmv-sdk-1.0.0
-        key: openmv-sdk-1.0.0-linux-x86_64
+        path: ~/openmv-sdk-${{ steps.sdk-ver.outputs.version }}
+        key: openmv-sdk-${{ steps.sdk-ver.outputs.version }}-linux-x86_64
 
     - name: '🛠 Install SDK'
       if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -154,14 +158,19 @@ jobs:
       with:
         repository: 'openmv/openmv'
         tag: 'development'
-        fileName: '*.zip'
+        fileName: 'firmware_OPENMV_RT1060.zip'
         extract: false
         out-file-path: 'old_firmware'
 
     - name: '📝 Generate report'
       run: |
-        SDK_DIR="${HOME}/openmv-sdk-1.0.0"
-        export PATH="${SDK_DIR}/gcc/bin:${SDK_DIR}/python/bin:${PATH}"
+        SDK_DIR="${HOME}/openmv-sdk-${{ steps.sdk-ver.outputs.version }}"
+        export PATH="${SDK_DIR}/gcc/bin:${PATH}"
+        sudo apt-get update
+        sudo apt-get install -y python3-tabulate
+        mkdir -p new_firmware/OPENMV_RT1060
+        elf=$(find new_firmware -name '*.elf' ! -path 'new_firmware/OPENMV_RT1060/*' -print -quit)
+        cp "$elf" new_firmware/OPENMV_RT1060/firmware.elf
         python3 tools/code_size.py > ${GITHUB_WORKSPACE}/${{ github.event.pull_request.number }}.md
 
     - name: '⬆ Upload report'
