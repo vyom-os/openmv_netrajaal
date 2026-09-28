@@ -296,7 +296,6 @@ async def init_device():
     try:
         db_store = DbStore(PROCESS_ID_STR, my_addr)
         logger.info(f"[INIT] DbStore initialized for process {PROCESS_ID_STR}")
-        raise RuntimeError("traceback check")
     except Exception as e:
         logger.error(f"EXCP_ERR: [INIT] Failed to initialize DbStore: {e}\n{logger.exc_str(e)}")
         return False
