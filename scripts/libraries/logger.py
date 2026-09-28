@@ -1,3 +1,5 @@
+import io
+import sys
 from collections import deque
 
 from clock_utils import format_epochms_str, get_epoch_ms, timestamp_str
@@ -7,6 +9,13 @@ SAVE_FATAL_LOGS = True
 
 log_q_len = 100
 saved_logs = deque([], log_q_len)
+
+
+def exc_str(exc):
+    # Input: exception; Output: str traceback text
+    buf = io.StringIO()
+    sys.print_exception(exc, buf)
+    return buf.getvalue()
 
 
 def get_saved_logs():
@@ -53,7 +62,7 @@ def error(m):
 
 
 def fatal(m):
-    log_internal(f"{timestamp_str()} [FATAL] : {m}")
+    log_internal(f"[FATAL] : {m}")
     if SAVE_FATAL_LOGS:
         try:
             save_log_entry(f"{timestamp_str()} [FATAL]: {m}")

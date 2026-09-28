@@ -1,4 +1,3 @@
-import sys
 import machine
 import utime
 import uasyncio as asyncio
@@ -23,8 +22,7 @@ async def supervised(
             await fn()
             logger.fatal(f"[SUP] `{name}` exited unexpectedly")
         except Exception as e:
-            logger.fatal(f"[SUP] `{name}` crashed: {e}")
-            sys.print_exception(e)
+            logger.fatal(f"[SUP] `{name}` crashed: {e}\n{logger.exc_str(e)}")
 
         ran_ms = utime.ticks_diff(utime.ticks_ms(), started)
         logger.info(f"[SUP] `{name}` ran for {ran_ms} ms")
@@ -91,8 +89,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("꩜꩜꩜꩜꩜꩜ stopped by user via keyboard interrupt ꩜꩜꩜꩜꩜꩜")
     except Exception as e:
-        print(f"error... {e}")
-        sys.print_exception(e)
+        logger.error(f"EXCP_ERR: error... {e}\n{logger.exc_str(e)}")
     finally:
         print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device... ꩜꩜꩜꩜꩜꩜")
         machine.reset()
