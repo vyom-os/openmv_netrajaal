@@ -1,5 +1,4 @@
 import os, struct
-import vfs, mimxrt
 try:
     from binascii import crc32
 except ImportError:
@@ -16,29 +15,14 @@ _MAGIC = b'ABST'
 _HDR = 16  # magic(4) + seq(4) + len(4) + crc(4)
 
 class ConfigStore:
-    def __init__(self, path='/flash', name='machinestate', max_bytes=100000): # 100KB
+    def __init__(self, path='/vyomos', name='machinestate', max_bytes=100000): # 100KB
         self.slot = _HDR + max_bytes
         self.max_bytes = max_bytes
         self.files = (f'{path}/{name}_a', f'{path}/{name}_b')
         self._ensure()
 
     def _ensure(self):
-        # Only to check flash is mounted or not
-        try:
-            os.chdir("/flash")
-            print("/flash accessible !!")
-        except OSError:  
-            # /flash not mounted — mount it manually
-            print("Error: /flash not mounted — mounting it manually")          
-            try:
-                vfs.mount(vfs.VfsFat(mimxrt.Flash()), "/flash")
-                print("/flash mounted successfully")
-            except OSError as e:
-                print(f"OSError: in mounting /flash manually, {str(e)}")
-
-            os.chdir("/flash")
-        
-        # The ONLY place files are created/sized. After this, in-place writes only.
+        # /vyomos is mounted by C (vyomos_fs_mount). Create/size slot files once.
         try:
             for f in self.files:
                 try:

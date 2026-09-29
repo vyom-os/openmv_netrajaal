@@ -775,12 +775,14 @@ def _rm_tree(path):
 
 
 def _wipe_vyomos_contents():
-    """Delete everything under /vyomos. Volume mount stays; used on new firmware only."""
+    """Delete log contents under /vyomos. Keeps machinestate; mount stays."""
     try:
         names = os.listdir(LOG_ROOT)
     except OSError:
         return
     for name in names:
+        if name.startswith("machinestate"):
+            continue
         _rm_tree(LOG_ROOT + "/" + name)
     _sync_fs()
 

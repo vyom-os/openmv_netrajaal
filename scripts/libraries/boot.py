@@ -55,7 +55,8 @@ if not PRODUCTION_MODE:
     DECRYPT_IMAGE_ON_HOPS = True
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
-USE_PIR_SENSOR = False
+USE_PIR_SENSOR = True
+sensor_initialized = False
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
 def get_rand(len=3):
@@ -78,7 +79,7 @@ MAX_ACK_MSGS_RECD = 500          # Maximum messages in received buffer
 MAX_AGE_MSG_RCD_SEC = 20   # 20 sec, after 20 sec messages will be removed
 # Chunk slots in CHUNK_STORAGE_BUFFER; block[0]=len (0=empty), block[1:]=payload
 trans_chunk_epoch_ms = None  # Epoch time when transfer started
-MEM_CLEANUP_INTERVAL_SEC = 5  # was 30 — more cleanup log lines
+MEM_CLEANUP_INTERVAL_SEC = 30  # Run memory cleanup every 30 seconds
 
 APP_DISARMED = False
 is_install_mode = False
@@ -122,36 +123,35 @@ RADIO_SNR_BYTES = 1
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # TIME VARS
-# Tuned short for dense /vyomos logging (more LoRa / process activity).
-MIN_SLEEP = 0.05   # was 0.1
-ACK_SLEEP = 0.3    # was 1
-CHUNK_SLEEP = 0.05 # was 0.1
+MIN_SLEEP = 0.1    # max 0.1, 0.02 (works with highest data rate)
+ACK_SLEEP = 1       # max 2, 1 (works with highest data rate)
+CHUNK_SLEEP = 0.1  # max 0.1, 0.04 (works with highest data rate)
 
-HB_WAIT = 20           # was 180 — heartbeats ~9x more often
-D_MSG_WAIT = 10        # was 60 — discovery ~6x more often
+HB_WAIT = 180
+D_MSG_WAIT = 60
 DISCOVERY_COUNT = 100
-SPATH_WAIT = 10        # was 30
-SPATH_WAIT_2 = 60      # was 1200
-SCAN_WAIT = 10         # was 30
-SCAN_WAIT_2 = 60       # was 1200
-VALIDATE_WAIT_SEC = 60 # was 1200
-PHOTO_TAKING_DELAY = 30  # was 600
+SPATH_WAIT = 30
+SPATH_WAIT_2 = 1200
+SCAN_WAIT = 30
+SCAN_WAIT_2 = 1200
+VALIDATE_WAIT_SEC = 1200
+PHOTO_TAKING_DELAY = 600
 
-GPS_WAIT_SEC = 15
-GPS_ACQUIRE_TIMEOUT_SEC = 120  # was 300
+GPS_WAIT_SEC = 30
+GPS_ACQUIRE_TIMEOUT_SEC = 300  # 5 min to obtain fix once per boot
 
-NETWORK_EMPTY_SLEEP = 5   # was 15
-NETWORK_IN_TRANS_SLEEP = 3  # was 10
-NETWORK_IMPROVE_SLEEP = 10  # was 30
-NETWORK_IMPROVE_COUNT = 20  # was 10 — keep hunting for paths longer
+NETWORK_EMPTY_SLEEP = 15 # 15 sec, when no path is there
+NETWORK_IN_TRANS_SLEEP = 10 # 10 sec, sleep when trans mode in progress
+NETWORK_IMPROVE_SLEEP = 30 # 30 sec, connected, but loopking for better path
+NETWORK_IMPROVE_COUNT = 10 # 10 times, loopking for better path
 
-NETWORK_STABLE_SLEEP = 30  # was 600 — refresh mesh often
-NET_PATH_EXPIRY_MS = 600000  # was 1800000 (10 min)
+NETWORK_STABLE_SLEEP = 600 # 600 second, 10 minutes
+NET_PATH_EXPIRY_MS = 1800000 # 1800 second, 30 minutes
 
 TRANSMODE_LOCK_TIMEOUT = 600 # TODO PRODUCTION
 TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
 CHUNK_BURST_SIZE = 50
-CHUNK_BURST_RX_SLEEP = 0.2  # was 0.4
+CHUNK_BURST_RX_SLEEP = 0.4
 
 
 # Config test for SF7
@@ -273,13 +273,13 @@ async def init_device():
     global my_addr
     global rtc
 
-    print("UID: ", f"{uid}")
+    logger.info(f"UID: {uid}")
     my_addr = get_my_addr()
     if my_addr is None:
         logger.error(f"error in main.py: Unknown device UID for {uid}, rebooting...")
         return False
-    print(f"MY_ADDR: {my_addr}")
-    print(f"FIRM_VER: {get_version_str(VERSION)}")
+    logger.info(f"MY_ADDR: {my_addr}")
+    logger.info(f"FIRM_VER: {get_version_str(VERSION)}")
 
     encnode = enc.EncNode(my_addr)
 
@@ -316,6 +316,11 @@ async def init_device():
         logger.warning("[MEM] Chunk storage buffer not available, rebooting device...")
         return False
 
+    # CAMERA / SENSOR =====>
+    if not init_camera_sensor():
+        logger.error("[INIT] Failed to initialize camera/sensor, will be retrying later...")
+    else:
+        power_mgmt.camera_sleep()  # sleep until first capture
     return True
 
 def init_file_recompile_buffer():
@@ -354,6 +359,23 @@ def init_chunk_storage_buffer():
         CHUNK_STORAGE_BUFFER = None
         return False
 
+def init_camera_sensor():
+    global sensor_initialized
+    try:
+        if sensor_initialized:
+            return True
+        sensor.reset()
+        sensor.set_pixformat(sensor.RGB565)
+        sensor.set_framesize(sensor.HD)
+        sensor.skip_frames(time=2000)
+        logger.info("[INIT] Camera/sensor initialized")
+        sensor_initialized = True
+        return True
+    except Exception as e:
+        sensor_initialized = False
+        logger.error(f"EXCP_ERR: [INIT] Failed to initialize camera/sensor: {e}\n{logger.exc_str(e)}")
+        return False
+
 def _chunk_block_offset(chunk_id):
     return chunk_id * CHUNK_BLOCK_SIZE
 
@@ -387,7 +409,7 @@ async def reboot_device():
             logger.info(f"Saving logs file {log_file} with {len(logs_list)} entries")
             logs_data = ("\n".join(logs_list)).encode()
             await db_store.save_file(logs_data, log_file)
-        print("REBOOTING DEVICE\n\n")
+        logger.info("REBOOTING DEVICE\n\n")
         machine.reset()
     except Exception as e: # Fail safe reboot
         logger.error(f"EXCP_ERR: [REBOOT] Error in reboot_device: {e}, rebooting ...\n{logger.exc_str(e)}")
@@ -519,12 +541,6 @@ def ack_needed(msg_typ): # msg_type P is devided in (B,I,E)
     if msg_typ in ["H", "B", "E", "C", "Z"]:
         return True
     return False
-
-sensor.reset()
-sensor.set_pixformat(sensor.RGB565)
-sensor.set_framesize(sensor.HD)
-sensor.skip_frames(time=2000)
-power_mgmt.camera_sleep()  # sleep until first capture
 
 URL_OLD = "https://n8n.vyomos.org/webhook/watchmen-detect/"
 # URL = "https://hqapi.vyomos.org/watchmen-detect/"
@@ -991,7 +1007,7 @@ async def lora_health_monitor():  # is_lora_ready is not being used
     global loranode, lora_init_in_progress
     global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_hasherr_count
     global radio_succ_count_prev, radio_fail_count_prev
-    RADIO_HEALTH_INTERVAL = 30  # was 120 — more radio health log lines
+    RADIO_HEALTH_INTERVAL = 120
     while True:
         try:
             if lora_init_in_progress:
@@ -2164,6 +2180,9 @@ def capture_image(compress_quality=None):
     power_mgmt.camera_wake()
     turn_ON_IR_emitter()
     try:
+        if not init_camera_sensor():
+            logger.error("[PIR] Failed to initialize camera/sensor, will be retrying later...")
+            return None, None, None
         img_snapshot = sensor.snapshot()
         turn_OFF_IR_emitter()
         if img_snapshot is None:
@@ -2314,10 +2333,10 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...\n{logger.exc_str(e)}")
                     led.off()
-            await asyncio.sleep(10 if USE_PIR_SENSOR else 10)  # was 35 / 900
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
         except Exception as e:
             logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}\n{logger.exc_str(e)}")
-            await asyncio.sleep(10 if USE_PIR_SENSOR else 10)  # was 35 / 900
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
 
         finally:
             pir_burst_in_progress = False
@@ -2328,12 +2347,11 @@ async def image_sending_loop():
     global trans_in_progress
     global db_store
 
-    # Shorter pauses → image/LoRa send loops run more often → denser logs
-    IMAGE_SENDING_EMPTY_DELAY = 5      # was 30
-    IMAGE_SENDING_LITE_DELAY = 5       # was 40
-    IMAGE_SENDING_NEXT_INTERVAL = 10   # was 50
-    IMAGE_SENDING_FAILED_PAUSE = 15    # was 60
-    IMAGE_SENDING_FAILED_PAUSE_2 = 20  # was 80
+    IMAGE_SENDING_EMPTY_DELAY = 30
+    IMAGE_SENDING_LITE_DELAY = 40
+    IMAGE_SENDING_NEXT_INTERVAL = 50
+    IMAGE_SENDING_FAILED_PAUSE = 60
+    IMAGE_SENDING_FAILED_PAUSE_2 = 80
 
     while True:
         if is_install_mode:
@@ -2810,7 +2828,7 @@ async def keep_generating_heartbeat():
                     logger.info("[HB] PAUSED")
                 print_pause = False
                 print_resume = True
-                await asyncio.sleep(20)  # was 200 — resume HB checks sooner after trans
+                await asyncio.sleep(200)
                 continue
             else:
                 if print_resume:
@@ -2820,12 +2838,12 @@ async def keep_generating_heartbeat():
 
             if running_as_unit() and len(network_paths) == 0:
                 logger.debug("Not sending heartbeat, because I am a unit with no network paths")
-                await asyncio.sleep(2)  # was 5
+                await asyncio.sleep(5)
                 continue
 
             if running_as_cc() and internet_module.is_busy:
                 logger.debug("Not sending heartbeat, because I am a CC and internet module is busy")
-                await asyncio.sleep(2)  # was 5
+                await asyncio.sleep(5)
                 continue
 
             sent_succ = await asyncio.create_task(send_heartbeat())
@@ -3037,7 +3055,7 @@ async def keep_updating_gps():
     global gps_str, gps_last_time, rtc, gps_module, tracx_uart, tracx_uart_lock, gps_success_count, gps_failure_count
     logger.info("[GPS] Starting one-shot GPS update for this boot...")
     if rtc is not None:
-        print(f"[RTC] at GPS start: {rtc.datetime()}")
+        logger.info(f"[RTC] at GPS start: {rtc.datetime()}")
 
     await asyncio.sleep(3)
 
@@ -3093,7 +3111,6 @@ async def keep_updating_gps():
                     time_components = gps_module.get_gps_time_components(time_str)
                     if time_components:
                         rtc.datetime(time_components)
-                        print(f"[RTC] after GPS update: {rtc.datetime()} ({time_str})")
                         logger.info(f"[GPS] RTC updated with GPS time: {time_str}")
                 except Exception as e:
                     logger.warning(f"EXCP_ERR: [GPS] Failed to update RTC: {e}\n{logger.exc_str(e)}")
@@ -3253,32 +3270,6 @@ class AppHandler:
     def get_saved_logs(self):
         return logger.return_saved_logs_and_clear()
 
-    def capture_image_to_verify_camera(self, type, quality=None):
-        """
-        Capture a JPEG image for verify_internet as bytes (no filesystem writes).
-        """
-        try:
-            power_mgmt.camera_wake()  # sleep(False) + skip_frames before snapshot
-            turn_ON_IR_emitter()
-            img = sensor.snapshot()
-            turn_OFF_IR_emitter()
-            if img is None:
-                return None
-            if quality:
-                jpeg_bytearray = img.compress(quality=quality)
-            else:
-                jpeg_bytearray = img.compress()
-            del img
-            gc.collect()
-            return bytes(jpeg_bytearray)
-        except Exception as e:
-            app_controller.create_and_send_message("verify_internet", {"message": f"capture_image_to_verify_camera: {e}", "result": "fail"}, timeout=0.5)
-            logger.error(f"EXCP_ERR: [{type}] capture_image_to_verify_camera: {e} [Fail]\n{logger.exc_str(e)}")
-            return None
-        finally:
-            turn_OFF_IR_emitter()
-            power_mgmt.camera_sleep()
-
     def get_internet_module_status(self):  # FUNCTION 1
         """ has_internet: boolean
             error: string, error message if not internet, else None"""
@@ -3312,8 +3303,6 @@ class AppHandler:
     async def verify_internet_capture_and_upload(self):
         try:
             _, img_bytes, _ = capture_image(compress_quality=35)
-            if not img_bytes:
-                return False
             return await self.upload_verify_image_to_server(img_bytes)
         finally:
             img_bytes = None
@@ -3352,7 +3341,7 @@ class AppHandler:
         try:
             _, img_bytes, _ = capture_image(compress_quality=35)
             if not img_bytes:
-                logger.error("[verify_image] capture_image_to_verify_camera returned no data")
+                logger.error("[verify_image] capture_image returned no data")
                 return False
 
             total_size = len(img_bytes)
@@ -3475,16 +3464,16 @@ async def keep_blinking_restart_led():
 
 async def main():
     global app_handler, app_controller
-    print(f"Entering MAIN loop... [PROCESS MODE]")
+    logger.info(f"Entering MAIN loop... [PROCESS MODE]")
+
     check_watchdog_reset()
-    # await led_restart_blinker()
+    start_watchdog()
+
     asyncio.create_task(supervised("keep_blinking_restart_led", keep_blinking_restart_led, critical=False))
 
     if not await init_device():
         await asyncio.sleep(10)
         await reboot_device()
-
-    start_watchdog()
 
     # HEALTH STATS ===>
     asyncio.create_task(supervised("periodic_health_stats_loop", periodic_health_stats_loop, critical=False))
@@ -3493,7 +3482,7 @@ async def main():
     asyncio.create_task(supervised("keep_checking_internet", keep_checking_internet, critical=True))
 
     def clear_install_mode_flag():
-        print(f"clear install mode flag")
+        logger.info(f"clear install mode flag")
         global is_install_mode
         is_install_mode = False
 
@@ -3545,7 +3534,12 @@ except Exception as e:
     logger.fatal(f"EXCP_ERR: Uncaught error in main.py: {str(e)}\n{logger.exc_str(e)}")
 finally:
     try:
-        print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device... ꩜꩜꩜꩜꩜꩜")
+        print("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device in 5 min... ꩜꩜꩜꩜꩜꩜")
+        try:
+            logger.info("꩜꩜꩜꩜꩜꩜ SHUTTING DOWN, and restarting the device in 5 min... ꩜꩜꩜꩜꩜꩜")
+        except Exception as e:
+            pass
+        utime.sleep(300)
         machine.reset()
     except Exception as e:
         logger.fatal(f"EXCP_ERR: error in restarting the device in main.py: {str(e)}\n{logger.exc_str(e)}")
