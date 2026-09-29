@@ -1,8 +1,10 @@
 import asyncio
+import binascii
 import errno
 import gc
 import hashlib
 import os
+import struct
 import ubinascii
 import utime
 
@@ -704,84 +706,429 @@ class DbStore(StoreUtils):
         return True
 
 
-# /vyomos/log.txt. No lock, and /vyomos is not created here.
+# /vyomos log rotation. Mount/mkfs is owned by C (vyomos_fs_mount):
+# LittleFS is created only when the volume has no filesystem magic (first boot
+# after that flash region is erased, e.g. full-chip / firmware region wipe).
+# Soft reboot and power cycle keep /vyomos. Python never mkfs/wipes the volume
+# except when config.VERSION changes (new firmware deploy) — see recovery.
+#
+# Active file grows to 1MB, then becomes /vyomos/zip/log_NNNNN.zip.
+# When active + zips exceed 3MB, delete the oldest zip.
+LOG_ROOT = "/vyomos"
 LOG_PATH = "/vyomos/log.txt"
-LOG_TMP_PATH = "/vyomos/log.tmp"
-LOG_OLD_PATH = "/vyomos/log.txt.old"
-
-LOG_MAX_BYTES = 3 * 1024 * 1024
-LOG_DROP_BYTES = 1 * 1024 * 1024
+LOG_ZIP_DIR = "/vyomos/zip"
+LOG_SEQ_PATH = "/vyomos/zip/seq.txt"
+LOG_SEQ_PARTIAL = "/vyomos/zip/seq.txt.partial"
+LOG_FW_VERSION_PATH = "/vyomos/.fw_version"
+LOG_SEGMENT_BYTES = 1 * 1024 * 1024
+LOG_BUDGET_BYTES = 3 * 1024 * 1024
 LOG_CHUNK_BYTES = 4096
-LOG_NEWLINE_SCAN_BYTES = 256
+# Local header (30) + EOCD (22) + central dir fixed (46) + 2 * name; name <= 32.
+LOG_ZIP_OVERHEAD = 30 + 22 + 46 + 64
+
+_log_ready = False
+_log_busy = False
 
 
-def _log_file_size():
+def _file_size(path):
     try:
-        return os.stat(LOG_PATH)[6]
+        return os.stat(path)[6]
     except OSError as e:
         if e.args and e.args[0] == errno.ENOENT:
             return 0
         raise
 
 
-def _append_log_line(line):
-    with open(LOG_PATH, "a") as f:
-        f.write(line + "\n")
-
-
-def _keep_newer_tail():
-    try:
-        os.remove(LOG_TMP_PATH)
-    except OSError as e:
-        if not e.args or e.args[0] != errno.ENOENT:
-            raise
-
-    with open(LOG_PATH, "rb") as src:
-        src.seek(LOG_DROP_BYTES)
-        window = src.read(LOG_NEWLINE_SCAN_BYTES)
-        newline_at = window.find(b"\n")
-        if newline_at >= 0:
-            pending = window[newline_at + 1:]
-        else:
-            pending = window
-        with open(LOG_TMP_PATH, "wb") as dst:
-            dst.write(pending)
-            while True:
-                chunk = src.read(LOG_CHUNK_BYTES)
-                if not chunk:
-                    break
-                dst.write(chunk)
-
-    os.rename(LOG_PATH, LOG_OLD_PATH)
-    try:
-        os.rename(LOG_TMP_PATH, LOG_PATH)
-    except Exception:
-        os.rename(LOG_OLD_PATH, LOG_PATH)
-        raise
-    try:
-        os.remove(LOG_OLD_PATH)
-    except Exception:
-        pass
+def _sync_fs():
     try:
         os.sync()
     except Exception:
         pass
 
 
-def _trim_log_file():
-    while True:
-        size = _log_file_size()
-        if size < LOG_MAX_BYTES:
-            return
-        if size <= LOG_DROP_BYTES:
-            os.remove(LOG_PATH)
-            return
-        _keep_newer_tail()
-        new_size = _log_file_size()
-        if new_size >= size:
-            return
+def _remove_path(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _rm_tree(path):
+    """Remove a file or directory tree. Never touches the /vyomos mount itself."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    # MicroPython: st[0] mode; directories have 0o040000
+    if (st[0] & 0o170000) == 0o040000:
+        try:
+            for name in os.listdir(path):
+                _rm_tree(path + "/" + name)
+        except OSError:
+            pass
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+    else:
+        _remove_path(path)
+
+
+def _wipe_vyomos_contents():
+    """Delete everything under /vyomos. Volume mount stays; used on new firmware only."""
+    try:
+        names = os.listdir(LOG_ROOT)
+    except OSError:
+        return
+    for name in names:
+        _rm_tree(LOG_ROOT + "/" + name)
+    _sync_fs()
+
+
+def _write_fw_version(version_str):
+    partial = LOG_FW_VERSION_PATH + ".partial"
+    try:
+        with open(partial, "w") as f:
+            f.write(version_str)
+        _sync_fs()
+        _remove_path(LOG_FW_VERSION_PATH)
+        os.rename(partial, LOG_FW_VERSION_PATH)
+        _sync_fs()
+    except OSError:
+        _remove_path(partial)
+
+
+def _firmware_version_str():
+    try:
+        from config import VERSION, get_version_str
+
+        return get_version_str(VERSION)
+    except Exception:
+        return ""
+
+
+def _maybe_clear_on_new_firmware():
+    """
+    Clear /vyomos only when the running firmware version differs from the
+    last version stored on the volume. Soft reboot with the same firmware
+    leaves all data intact. Missing marker (first boot of this feature)
+    records the current version without wiping existing files.
+    """
+    current = _firmware_version_str()
+    if not current:
+        return
+    try:
+        with open(LOG_FW_VERSION_PATH, "r") as f:
+            stored = f.read().strip()
+    except OSError:
+        _write_fw_version(current)
+        return
+    if stored == current:
+        return
+    _wipe_vyomos_contents()
+    _write_fw_version(current)
+
+
+def _ensure_zip_dir():
+    try:
+        os.listdir(LOG_ZIP_DIR)
+        return
+    except OSError:
+        pass
+    try:
+        os.mkdir(LOG_ZIP_DIR)
+    except OSError:
+        pass
+
+
+def _parse_zip_seq(name):
+    # log_00001.zip -> 1
+    try:
+        return int(name[4:9])
+    except (ValueError, IndexError):
+        return -1
+
+
+def _list_zip_names():
+    try:
+        names = os.listdir(LOG_ZIP_DIR)
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if name.startswith("log_") and name.endswith(".zip") and ".partial" not in name:
+            out.append(name)
+    out.sort()
+    return out
+
+
+def _expected_zip_size(src_size, arcname):
+    name_len = len(arcname.encode() if isinstance(arcname, str) else arcname)
+    return 30 + name_len + src_size + 46 + name_len + 22
+
+
+def _verify_store_zip(path, src_size, arcname):
+    """Return True if path looks like a complete store-method ZIP of src_size."""
+    size = _file_size(path)
+    if size != _expected_zip_size(src_size, arcname):
+        return False
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"PK\x03\x04":
+                return False
+            f.seek(14)
+            crc_hdr, comp, uncomp = struct.unpack("<III", f.read(12))
+            name_len, extra_len = struct.unpack("<HH", f.read(4))
+            if comp != src_size or uncomp != src_size:
+                return False
+            f.seek(30 + name_len + extra_len)
+            crc = 0
+            remaining = src_size
+            while remaining > 0:
+                n = remaining if remaining < LOG_CHUNK_BYTES else LOG_CHUNK_BYTES
+                chunk = f.read(n)
+                if len(chunk) != n:
+                    return False
+                crc = binascii.crc32(chunk, crc)
+                remaining -= n
+            if (crc & 0xFFFFFFFF) != (crc_hdr & 0xFFFFFFFF):
+                return False
+            f.seek(size - 22)
+            if f.read(4) != b"PK\x05\x06":
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _scrub_zip_dir():
+    """Remove incomplete/invalid archives left by power loss. Keeps good zips."""
+    try:
+        names = os.listdir(LOG_ZIP_DIR)
+    except OSError:
+        return
+    for name in names:
+        path = LOG_ZIP_DIR + "/" + name
+        if name.endswith(".partial"):
+            _remove_path(path)
+            continue
+        if not (name.startswith("log_") and name.endswith(".zip")):
+            continue
+        sz = _file_size(path)
+        if sz == 0:
+            _remove_path(path)
+            continue
+        try:
+            with open(path, "rb") as f:
+                if f.read(4) != b"PK\x03\x04":
+                    _remove_path(path)
+                    continue
+                f.seek(sz - 22)
+                if f.read(4) != b"PK\x05\x06":
+                    _remove_path(path)
+        except OSError:
+            _remove_path(path)
+
+
+def _recover_log_storage():
+    """
+    One-shot init: clear volume on new firmware version, scrub partials.
+    Does not wipe on soft reboot when firmware version is unchanged.
+    """
+    _maybe_clear_on_new_firmware()
+    _ensure_zip_dir()
+    _scrub_zip_dir()
+    _remove_path(LOG_SEQ_PARTIAL)
+    _sync_fs()
+
+
+def _total_log_bytes():
+    total = _file_size(LOG_PATH)
+    for name in _list_zip_names():
+        total += _file_size(LOG_ZIP_DIR + "/" + name)
+    return total
+
+
+def _max_zip_seq():
+    seq = 0
+    for name in _list_zip_names():
+        n = _parse_zip_seq(name)
+        if n > seq:
+            seq = n
+    return seq
+
+
+def _read_seq():
+    try:
+        with open(LOG_SEQ_PATH, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return _max_zip_seq()
+
+
+def _write_seq(seq):
+    """Atomic seq update via partial + rename."""
+    try:
+        with open(LOG_SEQ_PARTIAL, "w") as f:
+            f.write("%d" % seq)
+        _sync_fs()
+        _remove_path(LOG_SEQ_PATH)
+        os.rename(LOG_SEQ_PARTIAL, LOG_SEQ_PATH)
+        _sync_fs()
+    except OSError:
+        _remove_path(LOG_SEQ_PARTIAL)
+        raise
+
+
+def _alloc_seq():
+    seq = _read_seq() + 1
+    if seq <= _max_zip_seq():
+        seq = _max_zip_seq() + 1
+    _write_seq(seq)
+    return seq
+
+
+def _delete_oldest_zip():
+    zips = _list_zip_names()
+    if not zips:
+        return False
+    try:
+        os.remove(LOG_ZIP_DIR + "/" + zips[0])
+        _sync_fs()
+    except OSError:
+        return False
+    return True
+
+
+def _make_room(extra_needed):
+    """Delete oldest zips until active+zips+extra_needed fits in budget."""
+    while _total_log_bytes() + extra_needed > LOG_BUDGET_BYTES:
+        if not _delete_oldest_zip():
+            break
+
+
+def _file_crc32(path):
+    crc = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(LOG_CHUNK_BYTES)
+            if not chunk:
+                break
+            crc = binascii.crc32(chunk, crc)
+    return crc & 0xFFFFFFFF
+
+
+def _zip_store_file(src_path, dest_path, arcname):
+    """Write a minimal store-method ZIP (no compression) in chunked I/O."""
+    size = _file_size(src_path)
+    crc = _file_crc32(src_path)
+    name_b = arcname.encode() if isinstance(arcname, str) else arcname
+    name_len = len(name_b)
+
+    with open(dest_path, "wb") as out:
+        out.write(b"PK\x03\x04")
+        out.write(struct.pack("<HHHHHIIIHH", 20, 0, 0, 0, 0, crc, size, size, name_len, 0))
+        out.write(name_b)
+        with open(src_path, "rb") as inp:
+            while True:
+                chunk = inp.read(LOG_CHUNK_BYTES)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+        cd_offset = 30 + name_len + size
+        out.write(b"PK\x01\x02")
+        out.write(
+            struct.pack(
+                "<HHHHHHIIIHHHHHII",
+                20,
+                20,
+                0,
+                0,
+                0,
+                0,
+                crc,
+                size,
+                size,
+                name_len,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        )
+        out.write(name_b)
+        cd_size = 46 + name_len
+        out.write(b"PK\x05\x06")
+        out.write(struct.pack("<HHHHIIH", 0, 0, 1, 1, cd_size, cd_offset, 0))
+
+
+def _emergency_trim_active():
+    """If rotate cannot run, drop the active file so /vyomos cannot fill forever."""
+    _make_room(0)
+    if _file_size(LOG_PATH) >= LOG_SEGMENT_BYTES:
+        _remove_path(LOG_PATH)
+        _sync_fs()
+
+
+def _rotate_log():
+    """Zip current log to /vyomos/zip/log_NNNNN.zip and start a new active file."""
+    size = _file_size(LOG_PATH)
+    if size == 0:
+        return
+
+    _ensure_zip_dir()
+    _make_room(size + LOG_ZIP_OVERHEAD)
+
+    seq = _alloc_seq()
+    zip_name = "log_%05d.zip" % seq
+    zip_path = LOG_ZIP_DIR + "/" + zip_name
+    partial_path = zip_path + ".partial"
+    arcname = "log_%05d.txt" % seq
+
+    _remove_path(partial_path)
+    try:
+        _zip_store_file(LOG_PATH, partial_path, arcname)
+        _sync_fs()
+        if not _verify_store_zip(partial_path, size, arcname):
+            _remove_path(partial_path)
+            raise OSError("log zip verify failed")
+        _remove_path(zip_path)
+        os.rename(partial_path, zip_path)
+        _sync_fs()
+        _remove_path(LOG_PATH)
+        _sync_fs()
+    except OSError:
+        _remove_path(partial_path)
+        raise
+
+    while _total_log_bytes() > LOG_BUDGET_BYTES:
+        if not _delete_oldest_zip():
+            break
+    _sync_fs()
 
 
 def append_log_line(line):
-    _append_log_line(line)
-    _trim_log_file()
+    global _log_ready, _log_busy
+    if _log_busy:
+        # Avoid re-entrancy if anything during rotate somehow logs again.
+        return
+    _log_busy = True
+    try:
+        if not _log_ready:
+            try:
+                _recover_log_storage()
+            except OSError:
+                pass
+            _log_ready = True
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+        if _file_size(LOG_PATH) >= LOG_SEGMENT_BYTES:
+            try:
+                _rotate_log()
+            except OSError:
+                _emergency_trim_active()
+    finally:
+        _log_busy = False
