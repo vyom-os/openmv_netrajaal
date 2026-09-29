@@ -49,8 +49,7 @@ def info(m):
 
 
 def debug(m):
-    pass
-    # log_internal(f"[debug] : {m}")
+    log_internal(f"[debug] : {m}")
 
 
 def warning(m):

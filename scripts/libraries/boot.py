@@ -55,7 +55,7 @@ if not PRODUCTION_MODE:
     DECRYPT_IMAGE_ON_HOPS = True
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
-USE_PIR_SENSOR = True
+USE_PIR_SENSOR = False
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
 def get_rand(len=3):
@@ -78,7 +78,7 @@ MAX_ACK_MSGS_RECD = 500          # Maximum messages in received buffer
 MAX_AGE_MSG_RCD_SEC = 20   # 20 sec, after 20 sec messages will be removed
 # Chunk slots in CHUNK_STORAGE_BUFFER; block[0]=len (0=empty), block[1:]=payload
 trans_chunk_epoch_ms = None  # Epoch time when transfer started
-MEM_CLEANUP_INTERVAL_SEC = 30  # Run memory cleanup every 30 seconds
+MEM_CLEANUP_INTERVAL_SEC = 5  # was 30 — more cleanup log lines
 
 APP_DISARMED = False
 is_install_mode = False
@@ -122,35 +122,36 @@ RADIO_SNR_BYTES = 1
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # TIME VARS
-MIN_SLEEP = 0.1    # max 0.1, 0.02 (works with highest data rate)
-ACK_SLEEP = 1       # max 2, 1 (works with highest data rate)
-CHUNK_SLEEP = 0.1  # max 0.1, 0.04 (works with highest data rate)
+# Tuned short for dense /vyomos logging (more LoRa / process activity).
+MIN_SLEEP = 0.05   # was 0.1
+ACK_SLEEP = 0.3    # was 1
+CHUNK_SLEEP = 0.05 # was 0.1
 
-HB_WAIT = 180
-D_MSG_WAIT = 60
+HB_WAIT = 20           # was 180 — heartbeats ~9x more often
+D_MSG_WAIT = 10        # was 60 — discovery ~6x more often
 DISCOVERY_COUNT = 100
-SPATH_WAIT = 30
-SPATH_WAIT_2 = 1200
-SCAN_WAIT = 30
-SCAN_WAIT_2 = 1200
-VALIDATE_WAIT_SEC = 1200
-PHOTO_TAKING_DELAY = 600
+SPATH_WAIT = 10        # was 30
+SPATH_WAIT_2 = 60      # was 1200
+SCAN_WAIT = 10         # was 30
+SCAN_WAIT_2 = 60       # was 1200
+VALIDATE_WAIT_SEC = 60 # was 1200
+PHOTO_TAKING_DELAY = 30  # was 600
 
-GPS_WAIT_SEC = 30
-GPS_ACQUIRE_TIMEOUT_SEC = 300  # 5 min to obtain fix once per boot
+GPS_WAIT_SEC = 15
+GPS_ACQUIRE_TIMEOUT_SEC = 120  # was 300
 
-NETWORK_EMPTY_SLEEP = 15 # 15 sec, when no path is there
-NETWORK_IN_TRANS_SLEEP = 10 # 10 sec, sleep when trans mode in progress
-NETWORK_IMPROVE_SLEEP = 30 # 30 sec, connected, but loopking for better path
-NETWORK_IMPROVE_COUNT = 10 # 10 times, loopking for better path
+NETWORK_EMPTY_SLEEP = 5   # was 15
+NETWORK_IN_TRANS_SLEEP = 3  # was 10
+NETWORK_IMPROVE_SLEEP = 10  # was 30
+NETWORK_IMPROVE_COUNT = 20  # was 10 — keep hunting for paths longer
 
-NETWORK_STABLE_SLEEP = 600 # 600 second, 10 minutes
-NET_PATH_EXPIRY_MS = 1800000 # 1800 second, 30 minutes
+NETWORK_STABLE_SLEEP = 30  # was 600 — refresh mesh often
+NET_PATH_EXPIRY_MS = 600000  # was 1800000 (10 min)
 
 TRANSMODE_LOCK_TIMEOUT = 600 # TODO PRODUCTION
 TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
 CHUNK_BURST_SIZE = 50
-CHUNK_BURST_RX_SLEEP = 0.4
+CHUNK_BURST_RX_SLEEP = 0.2  # was 0.4
 
 
 # Config test for SF7
@@ -990,7 +991,7 @@ async def lora_health_monitor():  # is_lora_ready is not being used
     global loranode, lora_init_in_progress
     global radio_sent_succ_count, radio_sent_fail_count, radio_recd_succ_count, radio_recd_err_count, radio_recd_hasherr_count
     global radio_succ_count_prev, radio_fail_count_prev
-    RADIO_HEALTH_INTERVAL = 120
+    RADIO_HEALTH_INTERVAL = 30  # was 120 — more radio health log lines
     while True:
         try:
             if lora_init_in_progress:
@@ -2313,10 +2314,10 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...\n{logger.exc_str(e)}")
                     led.off()
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
+            await asyncio.sleep(10 if USE_PIR_SENSOR else 10)  # was 35 / 900
         except Exception as e:
             logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}\n{logger.exc_str(e)}")
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
+            await asyncio.sleep(10 if USE_PIR_SENSOR else 10)  # was 35 / 900
 
         finally:
             pir_burst_in_progress = False
@@ -2327,11 +2328,12 @@ async def image_sending_loop():
     global trans_in_progress
     global db_store
 
-    IMAGE_SENDING_EMPTY_DELAY = 30
-    IMAGE_SENDING_LITE_DELAY = 40
-    IMAGE_SENDING_NEXT_INTERVAL = 50
-    IMAGE_SENDING_FAILED_PAUSE = 60
-    IMAGE_SENDING_FAILED_PAUSE_2 = 80
+    # Shorter pauses → image/LoRa send loops run more often → denser logs
+    IMAGE_SENDING_EMPTY_DELAY = 5      # was 30
+    IMAGE_SENDING_LITE_DELAY = 5       # was 40
+    IMAGE_SENDING_NEXT_INTERVAL = 10   # was 50
+    IMAGE_SENDING_FAILED_PAUSE = 15    # was 60
+    IMAGE_SENDING_FAILED_PAUSE_2 = 20  # was 80
 
     while True:
         if is_install_mode:
@@ -2808,7 +2810,7 @@ async def keep_generating_heartbeat():
                     logger.info("[HB] PAUSED")
                 print_pause = False
                 print_resume = True
-                await asyncio.sleep(200)
+                await asyncio.sleep(20)  # was 200 — resume HB checks sooner after trans
                 continue
             else:
                 if print_resume:
@@ -2818,12 +2820,12 @@ async def keep_generating_heartbeat():
 
             if running_as_unit() and len(network_paths) == 0:
                 logger.debug("Not sending heartbeat, because I am a unit with no network paths")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)  # was 5
                 continue
 
             if running_as_cc() and internet_module.is_busy:
                 logger.debug("Not sending heartbeat, because I am a CC and internet module is busy")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)  # was 5
                 continue
 
             sent_succ = await asyncio.create_task(send_heartbeat())
