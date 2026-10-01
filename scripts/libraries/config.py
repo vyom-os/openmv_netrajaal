@@ -54,7 +54,7 @@ PVT_KEYS = {
 # Map board UID (hex bytes) to node address.
 UID_TO_ADDR = {
     b'04bd545dd759392a': 216,
-    b'e076465dd7193d2a': 217,
+    b'e606fe64d7093842': 217,
     b"e076465dd709102e": 218,
     b"04bd545dd7593b40": 219, # 04bd545dd7593b40
     b"04bd545dd759392c": 220,
@@ -96,7 +96,7 @@ my_addr = UID_TO_ADDR.get(uid)
 # 02.00.4
 major = 2  # (0-63)
 minor = 5  # (0-99)
-patch = 3  # (0-9)
+patch = 4  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
