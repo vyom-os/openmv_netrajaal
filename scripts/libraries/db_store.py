@@ -775,14 +775,12 @@ def _rm_tree(path):
 
 
 def _wipe_vyomos_contents():
-    """Delete log contents under /vyomos. Keeps machinestate; mount stays."""
+    """Delete everything under /vyomos. Volume mount stays; used on new firmware only."""
     try:
         names = os.listdir(LOG_ROOT)
     except OSError:
         return
     for name in names:
-        if name.startswith("machinestate"):
-            continue
         _rm_tree(LOG_ROOT + "/" + name)
     _sync_fs()
 
@@ -862,6 +860,68 @@ def _list_zip_names():
             out.append(name)
     out.sort()
     return out
+
+
+def _store_zip_payload(path):
+    """Return (arcname, payload_offset, payload_size) for a store-method zip.
+
+    Payload is the uncompressed .txt sitting after the local file header.
+    Returns None if the file is not a readable store-method zip.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"PK\x03\x04":
+                return None
+            f.seek(8)
+            method = struct.unpack("<H", f.read(2))[0]
+            if method != 0:
+                return None
+            f.seek(18)
+            comp, uncomp = struct.unpack("<II", f.read(8))
+            name_len, extra_len = struct.unpack("<HH", f.read(4))
+            name = f.read(name_len)
+            if comp != uncomp:
+                return None
+            if extra_len:
+                f.read(extra_len)
+            return (name.decode(), 30 + name_len + extra_len, uncomp)
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def list_vyomos_log_exports():
+    """Log payloads to copy off /vyomos, oldest segment first, then the live file.
+
+    Each dict:
+      file_name: str  — log_NNNNN.txt for a rotated segment, or log.txt
+      path: str       — filesystem path to open
+      offset: int     — byte offset of the text payload (0 for log.txt)
+      size: int       — payload length in bytes
+    """
+    items = []
+    for name in _list_zip_names():
+        path = LOG_ZIP_DIR + "/" + name
+        info = _store_zip_payload(path)
+        if not info:
+            continue
+        arcname, offset, size = info
+        if size <= 0:
+            continue
+        items.append({
+            "file_name": arcname,
+            "path": path,
+            "offset": offset,
+            "size": size,
+        })
+    active_size = _file_size(LOG_PATH)
+    if active_size > 0:
+        items.append({
+            "file_name": "log.txt",
+            "path": LOG_PATH,
+            "offset": 0,
+            "size": active_size,
+        })
+    return items
 
 
 def _expected_zip_size(src_size, arcname):

@@ -22,6 +22,47 @@ DATA_BUFFER_SIZE = 4096
 
 _file_transfer_state = None
 _message_buffer = ""
+VYOMOS_LOG_CHUNK_BYTES = 2048
+
+
+def _split_utf8_tail(raw):
+    """Split raw so the prefix is complete UTF-8 and the tail is a partial char."""
+    if not raw:
+        return raw, b""
+    i = len(raw) - 1
+    cont = 0
+    while i >= 0 and cont < 3 and (raw[i] & 0xC0) == 0x80:
+        i -= 1
+        cont += 1
+    if i < 0:
+        return b"", raw
+    lead = raw[i]
+    if lead < 0x80:
+        return raw, b""
+    if lead >= 0xF0:
+        need = 4
+    elif lead >= 0xE0:
+        need = 3
+    elif lead >= 0xC0:
+        need = 2
+    else:
+        return raw, b""
+    if (len(raw) - i) < need:
+        return raw[:i], raw[i:]
+    return raw, b""
+
+
+def _decode_log_bytes(raw):
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        chars = []
+        for b in raw:
+            if b == 9 or b == 10 or b == 13 or (32 <= b < 127):
+                chars.append(chr(b))
+            else:
+                chars.append("?")
+        return "".join(chars)
 
 
 class AppController:
@@ -63,6 +104,9 @@ class AppController:
         # Ping/pong watchdog: reconnect the socket if the app goes quiet.
         self._last_recv_time = None
         self._last_msg_timeout_s = 14
+        # While True, do not ping or drop the socket for silence. The log
+        # transfer itself is the traffic, and a 3MB copy can exceed 14s.
+        self._vyomos_log_transfer = False
 
     # -------------------------------------------------------------------------
     # WiFi / socket setup
@@ -291,9 +335,10 @@ class AppController:
                         #     await self._wifi_session_timeout_disconnect()
                         #     continue
 
-                        self._send_ping()
+                        if not self._vyomos_log_transfer:
+                            self._send_ping()
 
-                        if self._last_recv_time is not None:
+                        if (not self._vyomos_log_transfer) and self._last_recv_time is not None:
                             elapsed = time.time() - self._last_recv_time
                             logger.debug(
                                 f"[WATCHDOG] last message {elapsed:.1f}s ago "
@@ -777,12 +822,173 @@ class AppController:
     # File / log send helpers
     # -------------------------------------------------------------------------
 
+    def _send_typed_message(self, message_type, data, timeout=1.0):
+        msg = {
+            "message_type": message_type,
+            "data": data,
+            "timestamp": time.time(),
+        }
+        return self.send_data_to_app(msg, timeout)
+
+    async def download_vyomos_logs(self):
+        """Copy every /vyomos log segment to the app over the WiFi socket."""
+        if self._vyomos_log_transfer:
+            self._send_typed_message(
+                "log_transfer_error",
+                {"message": "transfer already in progress", "result": "fail"},
+                0.5,
+            )
+            return
+
+        self._vyomos_log_transfer = True
+        self._last_recv_time = time.time()
+        try:
+            import db_store
+            files = db_store.list_vyomos_log_exports()
+            file_count = len(files)
+            manifest = []
+            for i, item in enumerate(files):
+                manifest.append({
+                    "file_index": i,
+                    "file_name": item["file_name"],
+                    "file_size": item["size"],
+                })
+            ok, _ = self._send_typed_message(
+                "log_transfer_start",
+                {"file_count": file_count, "files": manifest},
+                1.0,
+            )
+            if not ok:
+                return
+
+            for file_index, item in enumerate(files):
+                ok = await self._stream_vyomos_log_file(file_index, file_count, item)
+                if ok is None:
+                    return
+                if not ok:
+                    self._send_typed_message(
+                        "log_transfer_error",
+                        {
+                            "message": "failed while sending " + item["file_name"],
+                            "result": "fail",
+                            "file_index": file_index,
+                            "file_name": item["file_name"],
+                        },
+                        1.0,
+                    )
+                    return
+                await asyncio.sleep(0)
+
+            self._send_typed_message(
+                "log_transfer_complete",
+                {"file_count": file_count, "result": "pass"},
+                1.0,
+            )
+        except Exception as e:
+            logger.error(f"[VYOMOS_LOG] download failed: {e}")
+            self._send_typed_message(
+                "log_transfer_error",
+                {"message": str(e), "result": "fail"},
+                1.0,
+            )
+        finally:
+            self._vyomos_log_transfer = False
+            self._last_recv_time = time.time()
+
+    async def _stream_vyomos_log_file(self, file_index, file_count, item):
+        file_name = item["file_name"]
+        path = item["path"]
+        offset = item["offset"]
+        size = item["size"]
+        chunk_bytes = VYOMOS_LOG_CHUNK_BYTES
+
+        ok, _ = self._send_typed_message(
+            "log_file_start",
+            {
+                "file_index": file_index,
+                "file_count": file_count,
+                "file_name": file_name,
+                "file_size": size,
+                "chunk_size": chunk_bytes,
+            },
+            1.0,
+        )
+        if not ok:
+            return False
+
+        chunk_index = 0
+        bytes_sent = 0
+        carry = b""
+        try:
+            with open(path, "rb") as f:
+                if offset:
+                    f.seek(offset)
+                remaining = size
+                while remaining > 0:
+                    want = chunk_bytes - len(carry)
+                    if want > remaining:
+                        want = remaining
+                    if want < 1:
+                        want = 1
+                    piece = f.read(want)
+                    if not piece:
+                        break
+                    remaining -= len(piece)
+                    buf = carry + piece
+                    if remaining > 0:
+                        complete, carry = _split_utf8_tail(buf)
+                    else:
+                        complete = buf
+                        carry = b""
+                    if not complete:
+                        continue
+                    text = _decode_log_bytes(complete)
+                    ok, _ = self._send_typed_message(
+                        "log_file_chunk",
+                        {
+                            "file_index": file_index,
+                            "file_name": file_name,
+                            "chunk_index": chunk_index,
+                            "chunk_size": len(complete),
+                            "data": text,
+                        },
+                        5.0,
+                    )
+                    if not ok:
+                        return False
+                    bytes_sent += len(complete)
+                    chunk_index += 1
+                    self._last_recv_time = time.time()
+                    await asyncio.sleep(0)
+        except Exception as e:
+            logger.error(f"[VYOMOS_LOG] read {path} failed: {e}")
+            self._send_typed_message(
+                "log_transfer_error",
+                {
+                    "message": str(e),
+                    "result": "fail",
+                    "file_index": file_index,
+                    "file_name": file_name,
+                },
+                1.0,
+            )
+            return None
+
+        ok, _ = self._send_typed_message(
+            "log_file_end",
+            {
+                "file_index": file_index,
+                "file_name": file_name,
+                "file_size": size,
+                "bytes_sent": bytes_sent,
+                "total_chunks": chunk_index,
+            },
+            1.0,
+        )
+        return ok
+
     def send_log_file(self, filename="main.log"):
-        """
-        Stream the main log file over the WiFi socket in chunks.
-        This is triggered by the 'download_logs' command.
-        Uses the same path as the logger so we read from where logs are written.
-        """
+        """Stream an SD/flash log file. VyomOS export uses download_vyomos_logs."""
         log_path = None
         try:
             try:
@@ -1152,6 +1358,12 @@ class AppController:
                 logger.error("invalid value provided")
         elif command == "get_logs":
             self.get_recent_logs()
+        elif command == "download_logs":
+            logger.info(f"received command: {message}")
+            try:
+                asyncio.create_task(self.download_vyomos_logs())
+            except Exception as e:
+                logger.error(f"[VYOMOS_LOG] Failed to create task: {e}")
         elif command == "list_images":
             self.list_images()
         elif command == "clear_image_queue":
