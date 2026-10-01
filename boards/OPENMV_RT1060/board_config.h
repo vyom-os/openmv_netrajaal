@@ -111,7 +111,8 @@
 #define OMV_FLASH_FFS_ORIGIN            0x60400000
 #define OMV_FLASH_FFS_LENGTH            0x00400000
 
-// ROMFS configuration.
+// Former model ROMFS. Backing store for the /vyomos LittleFS volume.
+// This range is not part of the USB MSC disk (/flash or /sdcard).
 #define OMV_ROMFS_PART0_ORIGIN          0x60800000
 #define OMV_ROMFS_PART0_LENGTH          8M
 

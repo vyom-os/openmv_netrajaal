@@ -76,9 +76,6 @@ ci_build_target() {
 ########################################################################################
 # Prepare Firmware Packages.
 ci_package_firmware_release() {
-    # Add WiFi firmware blobs
-    cp -rf drivers/cyw4343/firmware firmware/CYW4343
-    cp -rf drivers/winc1500/firmware firmware/WINC1500
     (cd firmware && zip -r ../firmware_${1}.zip *)
 }
 
