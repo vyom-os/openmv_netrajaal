@@ -172,7 +172,7 @@ class AppController:
             logger.info("[APP] App not running, self.is_running = False")
             return False
         if not self.wifi_nic.isconnected() and self.cont_wifi_fail_count>=3:
-            logger.info(f"[APP] WiFi not connected, wifi not connected for {self.cont_wifi_fail_coun} consecutive times")
+            logger.info(f"[APP] WiFi not connected, wifi not connected for {self.cont_wifi_fail_count} consecutive times")
             return False
         if self.cont_socket_fail_count >= 4:
             logger.info(f"[APP] Continuous socket failures, socket not connected {self.cont_socket_fail_count} consecutive times")
