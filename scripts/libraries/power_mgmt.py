@@ -58,13 +58,11 @@ def camera_wake():
 def system_can_power_save(
     trans_in_progress=False,
     pir_burst_in_progress=False,
-    is_install_mode=False,
-    packet_queue_len=0,
+    is_install_mode=False
 ):
     """True when safe to idle CPU without disrupting LoRa/PIR/transfer."""
     return not (
         trans_in_progress
         or pir_burst_in_progress
         or is_install_mode
-        or packet_queue_len > 0
     )

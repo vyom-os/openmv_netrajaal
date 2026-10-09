@@ -298,7 +298,15 @@ class SX1262(SX126X):
             self._last_rssi = None
             self._last_snr = None
 
-        ASSERT(super().startReceive())
+        # Must re-arm RX even if packet-params/SPI glitched; ASSERT here
+        # used to abort the IRQ handler and leave the chip in standby.
+        try:
+            super().startReceive()
+        except Exception:
+            try:
+                super().setRx(SX126X_RX_TIMEOUT_INF)
+            except Exception:
+                pass
 
         if state == ERR_NONE or state == ERR_CRC_MISMATCH:
             return bytes(data), state

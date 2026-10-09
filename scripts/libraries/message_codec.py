@@ -114,3 +114,44 @@ def parse_heartbeat_b64bytes(b64_bytes):  # string bytes should be send as encod
         return {}
 
     return parse_heartbeat_rawbytes(raw_bytes)
+
+
+DEVICE_ID_BYTES = 1
+X_EPOCH_SEC_BYTES = 5
+X_PAYLOAD_BYTES = DEVICE_ID_BYTES + X_EPOCH_SEC_BYTES  # 6
+
+
+def encode_x_message(device_id, epoch_sec):
+    """X scan payload: device_id (1 byte) + epoch_sec (5 bytes). Returns None on bad input."""
+    try:
+        if not isinstance(device_id, int):
+            raise TypeError("device_id must be int, got {}".format(type(device_id)))
+        if not 0 <= device_id <= 255:
+            raise ValueError("device_id {} out of range (0-255)".format(device_id))
+        if not isinstance(epoch_sec, int):
+            raise TypeError("epoch_sec must be int, got {}".format(type(epoch_sec)))
+        if epoch_sec < 0:
+            raise ValueError("epoch_sec {} out of range".format(epoch_sec))
+        return int_to_nbytes(device_id, DEVICE_ID_BYTES) + int_to_nbytes(epoch_sec, X_EPOCH_SEC_BYTES)
+    except Exception as e:
+        logger.error("Failed to encode X message: {}".format(e))
+        return None
+
+
+def decode_x_message(msgbytes):
+    """Return (device_id, epoch_sec). epoch_sec is None when the payload is only the device id."""
+    try:
+        if not isinstance(msgbytes, (bytes, bytearray)):
+            logger.error("X payload must be bytes, got {}".format(type(msgbytes)))
+            return None, None
+        if len(msgbytes) == DEVICE_ID_BYTES:
+            return _to_nbyte_int(msgbytes, 0, DEVICE_ID_BYTES), None
+        if len(msgbytes) == X_PAYLOAD_BYTES:
+            device_id = _to_nbyte_int(msgbytes, 0, DEVICE_ID_BYTES)
+            epoch_sec = _to_nbyte_int(msgbytes, DEVICE_ID_BYTES, X_EPOCH_SEC_BYTES)
+            return device_id, epoch_sec
+        logger.error("Invalid X payload size: {}".format(len(msgbytes)))
+        return None, None
+    except Exception as e:
+        logger.error("Failed to decode X message: {}".format(e))
+        return None, None

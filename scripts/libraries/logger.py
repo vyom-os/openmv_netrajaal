@@ -1,38 +1,70 @@
+import io
+import sys
 from collections import deque
+
+from clock_utils import format_epochms_str, get_epoch_ms, timestamp_str
 from config import save_log_entry
-from clock_utils import get_epoch_ms
 
 SAVE_FATAL_LOGS = True
 
 log_q_len = 100
 saved_logs = deque([], log_q_len)
 
+
+def exc_str(exc):
+    # Input: exception; Output: str traceback text
+    buf = io.StringIO()
+    sys.print_exception(exc, buf)
+    return buf.getvalue()
+
+
 def get_saved_logs():
     return saved_logs
+
+
 def return_saved_logs_and_clear():
     global saved_logs
     to_ret = saved_logs
     saved_logs = deque([], log_q_len)
     return to_ret
 
-def log_internal(m):
-    print(m)
-    saved_logs.append(m)
+
+def log_internal(level_message):
+    try:
+        timestamp = format_epochms_str(get_epoch_ms())
+        line = f"{timestamp} {level_message}"
+    except Exception:
+        line = level_message
+    print(line)
+    saved_logs.append(line)
+    try:
+        import db_store
+        db_store.append_log_line(line)
+    except Exception as e:
+        print(e)
+
 
 def info(m):
     log_internal(f"[info] : {m}")
+
+
 def debug(m):
     pass
     # log_internal(f"[debug] : {m}")
+
+
 def warning(m):
     log_internal(f"[WARNING] : {m}")
+
+
 def error(m):
     log_internal(f"[ERROR] : {m}")
+
+
 def fatal(m):
     log_internal(f"[FATAL] : {m}")
     if SAVE_FATAL_LOGS:
         try:
-            epoch_ms = get_epoch_ms()
-            save_log_entry(f'{epoch_ms} [FATAL]: {m}')
+            save_log_entry(f"{timestamp_str()} [FATAL]: {m}")
         except Exception as e:
             pass

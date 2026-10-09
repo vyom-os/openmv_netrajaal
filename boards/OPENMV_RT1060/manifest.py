@@ -65,6 +65,8 @@ freeze("$(OMV_LIB_DIR)/", "power_mgmt.py")
 freeze("$(OMV_LIB_DIR)/", "clock_utils.py")
 freeze("$(OMV_LIB_DIR)/", "config_store.py")
 freeze("$(OMV_LIB_DIR)/", "watchdog.py")
+freeze("$(OMV_LIB_DIR)/", "radio_owner_new.py")
+freeze("$(OMV_LIB_DIR)/", "supervisor.py")
 
 # rsa package
 # freeze("$(OMV_LIB_DIR)/rsa")

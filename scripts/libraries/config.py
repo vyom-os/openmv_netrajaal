@@ -4,13 +4,12 @@ from machine import LED
 import uasyncio as asyncio
 import json
 import utime
-from clock_utils import get_epoch_ms, format_epochms_str
+from clock_utils import get_epoch_ms, format_epochms_str, set_device_epoch_ms
 from config_store import ConfigStore
 from rsa.key import PublicKey, PrivateKey
 
 # Encryption policy
 ENCRYPTION_ENABLED = True
-rtc = machine.RTC()
 
 # Node address -> (n, e, d, p, q) for RSA PrivateKey.
 PVT_KEYS = {
@@ -55,7 +54,7 @@ PVT_KEYS = {
 # Map board UID (hex bytes) to node address.
 UID_TO_ADDR = {
     b'04bd545dd759392a': 216,
-    b'e076465dd7193d2a': 217,
+    b'e606fe64d7093842': 217,
     b"e076465dd709102e": 218,
     b"04bd545dd7593b40": 219, # 04bd545dd7593b40
     b"04bd545dd759392c": 220,
@@ -96,12 +95,12 @@ my_addr = UID_TO_ADDR.get(uid)
 # XX.XX.X
 # 02.00.4
 major = 2  # (0-63)
-minor = 3  # (0-99)
+minor = 5  # (0-99)
 patch = 6  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
-def get_version_str(version):
+def get_version_str(version=VERSION):
     """
     Decode packed version integer to XX.XX.X string (inverse of major*1000 + minor*10 + patch).
 
@@ -210,10 +209,18 @@ def get_machine_uid():
     """Return unique machine UID"""
     return uid
 
-def get_my_addr():
+def get_my_addr():  # use get_machine_id instead
     saved_id = get_key_value('machine_id')
     if saved_id:
-        return int(saved_id)
+        if my_addr:
+            if int(saved_id) == my_addr:
+                return int(saved_id)
+            else:
+                set_key_value('machine_id', my_addr)
+                print(f"Error, id saved in flash: {saved_id}, not equal to config addr: {my_addr}, hence updated")
+                return my_addr
+        else:
+            return int(saved_id)
     elif my_addr:
         set_key_value('machine_id', my_addr)
         return my_addr
@@ -223,7 +230,15 @@ def get_my_addr():
 def get_machine_id():
     saved_id = get_key_value('machine_id')
     if saved_id:
-        return int(saved_id)
+        if my_addr:
+            if int(saved_id) == my_addr:
+                return int(saved_id)
+            else:
+                set_key_value('machine_id', my_addr)
+                print(f"Error, id saved in flash: {saved_id}, not equal to config addr: {my_addr}, hence updated")
+                return my_addr
+        else:
+            return int(saved_id)
     elif my_addr:
         set_key_value('machine_id', my_addr)
         return my_addr
@@ -243,17 +258,8 @@ def set_machine_id(id):
 def get_machine_time():
     return get_epoch_ms()
 
-def set_machine_time(epoch_ms):
-    try:
-        # RT1062 RTC is second-precision; subseconds are always 0.
-        t = utime.gmtime(int(epoch_ms) // 1000)
-        # gmtime: (Y, M, D, h, m, s, weekday, yearday)
-        # RTC:    (Y, M, D, weekday, h, m, s, subseconds)       weekday 0=Mon..6=Sun
-        rtc.datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
-        return True
-    except Exception as e:
-        print(f"Error in set_machine_time: {e}")
-        return False
+def set_machine_time(epoch_ms):  # use clock_utils.set_device_epoch_ms() instead
+    return set_device_epoch_ms(epoch_ms)
 
 def _load_machine_keys(): 
     """ only being called if we have the machine id set already """
