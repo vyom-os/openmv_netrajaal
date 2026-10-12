@@ -95,7 +95,7 @@ led.off()
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # SIZE VARS
-CHUNK_DATA_SIZE = 200
+CHUNK_DATA_SIZE = 100
 PACKET_PAYLOAD_LIMIT = CHUNK_DATA_SIZE + 15
 PACKET_BODY_LIMIT = CHUNK_DATA_SIZE + 5
 RSA_ENCRYPTION_LIMIT = 117
