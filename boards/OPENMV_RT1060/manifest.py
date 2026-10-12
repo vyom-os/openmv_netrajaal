@@ -41,7 +41,7 @@ require("protocol", library="openmv-lib")
 include("$(MPY_DIR)/extmod/asyncio")
 
 # Boot script
-# freeze ("$(OMV_LIB_DIR)/", "_boot.py")
+freeze ("$(OMV_LIB_DIR)/", "_boot.py")
 
 freeze("$(OMV_LIB_DIR)/", "app_controller.py")
 freeze("$(OMV_LIB_DIR)/", "config.py")
