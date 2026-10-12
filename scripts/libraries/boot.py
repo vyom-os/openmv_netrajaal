@@ -1745,45 +1745,34 @@ async def hb_process(msg_uid, msgbytes, sender):
     # Input: msg_uid: bytes, msgbytes: bytes, sender: int; Output: None (routes or logs heartbeat data)
     creator = int(msg_uid[1])
     if running_as_cc():
-        if creator not in hb_map:
-            hb_map[creator] = 0
-        hb_map[creator] += 1
-        logger.info(f"[HB] HB Counts = {hb_map}")
+        try:
+            if creator not in hb_map:
+                hb_map[creator] = 0
+            hb_map[creator] += 1
+            logger.info(f"[HB] HB Counts = {hb_map}")
 
-        # Send raw heartbeat data (encrypted or not) to cloud
-        if isinstance(msgbytes, bytes):
+            # binary data to - Base64 and remove newline if any, then decode() to an ASCII str.
             hb_b64_str = ubinascii.b2a_base64(msgbytes).rstrip().decode()
-        else:
-            hb_b64_str = msgbytes
+            epoch_ms = get_epoch_ms()
+            server_payload =  {
+                "machine_id": creator,
+                "msg_typ":  "H",
+                "data": hb_b64_str,
+                "epoch_ms": epoch_ms,
+                "enc": ENCRYPTION_ENABLED
+            }
 
-        epoch_ms = get_epoch_ms()
-        server_payload =  {
-            "machine_id": creator,
-            "msg_typ":  "H",
-            "data": hb_b64_str,
-            "epoch_ms": epoch_ms,
-            "enc": ENCRYPTION_ENABLED
-        }
-
-        logger.info(f"[HB] Uploading raw heartbeat data of length {len(msgbytes)} bytes...")
-        asyncio.create_task(upload_payload_to_server(server_payload, "H", creator))
-        if ENCRYPTION_ENABLED and is_rsa_encrypted("H"):
-            try:
+            logger.info(f"[HB] Uploading raw heartbeat data of length {len(msgbytes)} bytes...")
+            asyncio.create_task(upload_payload_to_server(server_payload, "H", creator))
+            if ENCRYPTION_ENABLED and is_rsa_encrypted("H"):
                 decrypted_msg = enc.decrypt_rsa(msgbytes, encnode.get_prv_key(creator))
-                logger.debug(f"[HB] HB send msg = {decrypted_msg}")
-            except Exception as e:
-                logger.error(f"EXCP_ERR: [HB] Failed to decrypt HB message: {e}\n{logger.exc_str(e)}")
-        else:
-            try:
-                logger.info(f"[HB] HB uploading, decoded msg = {msgbytes.decode()}, type={type(msgbytes)}")
-            except Exception as e:
-                logger.error(f"EXCP_ERR: [HB] Error decoding HB message: {e}\n{logger.exc_str(e)}")
-                try:
-                    logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}, type={type(msgbytes)}")
-                except Exception as e:
-                    logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}")
-
-        return
+                logger.info(f"[HB] HB send msg = {decrypted_msg}")
+            else:
+                logger.info(f"[HB] HB uploading, str msg = {hb_b64_str}")                          
+        except Exception as e:
+            logger.error(f"EXCP_ERR: [HB] Failed to upload heartbeat data, msgbytes = {msgbytes}, type={type(msgbytes)}, error: {e}\n{logger.exc_str(e)}")
+        finally:
+            return
     else:
         next_dst = next_device_in_spath()
         if next_dst:
