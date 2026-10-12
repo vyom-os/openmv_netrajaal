@@ -95,7 +95,7 @@ led.off()
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # SIZE VARS
-CHUNK_DATA_SIZE = 100
+CHUNK_DATA_SIZE = 200
 PACKET_PAYLOAD_LIMIT = CHUNK_DATA_SIZE + 15
 PACKET_BODY_LIMIT = CHUNK_DATA_SIZE + 5
 RSA_ENCRYPTION_LIMIT = 117
@@ -289,7 +289,7 @@ async def init_device():
         return False
     logger.info(
         f"[INIT] ===> MyAddr = {my_addr}, "
-        f"uid={uid.decode()}, PROCESS_ID_STR={PROCESS_ID_STR} <===\n"
+        f"uid={uid.decode()}, PROCESS_ID_STR={PROCESS_ID_STR}, VERSION={get_version_str(VERSION)} <===\n"
     )
 
     # MEMORY FREE, ALLOCATION =====>
