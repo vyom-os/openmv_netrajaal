@@ -95,7 +95,7 @@ led.off()
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # SIZE VARS
-CHUNK_DATA_SIZE = 200
+CHUNK_DATA_SIZE = 60
 PACKET_PAYLOAD_LIMIT = CHUNK_DATA_SIZE + 15
 PACKET_BODY_LIMIT = CHUNK_DATA_SIZE + 5
 RSA_ENCRYPTION_LIMIT = 117
@@ -155,7 +155,7 @@ CHUNK_BURST_RX_SLEEP = 0.4
 
 # Config test for SF7
 LORA_FREQ = 868.0
-LORA_BW = 250             # 125kHz provides better sensitivity than wider bandwidths
+LORA_BW = 125             # 125kHz provides better sensitivity than wider bandwidths
 LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-800m
 LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
 LORA_POWER = 22           # Maximum power for strong signal margin
