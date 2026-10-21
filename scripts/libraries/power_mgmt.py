@@ -47,7 +47,7 @@ def camera_wake():
         logger.warning(f"[PWR] camera_wake/skip_frames failed ({e}); re-init")
         try:
             sensor.reset()
-            sensor.set_pixformat(sensor.RGB565)
+            sensor.set_pixformat(sensor.GRAYSCALE)
             sensor.set_framesize(sensor.HD)
             sensor.skip_frames(time=1000)
             _asleep = False

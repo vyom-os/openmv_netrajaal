@@ -95,7 +95,7 @@ def init_camera_sensor():
         if sensor_initialized:
             return True
         sensor.reset()
-        sensor.set_pixformat(sensor.RGB565)
+        sensor.set_pixformat(sensor.GRAYSCALE)
         sensor.set_framesize(sensor.HD)
         sensor.skip_frames(time=2000)
         sensor_initialized = True
