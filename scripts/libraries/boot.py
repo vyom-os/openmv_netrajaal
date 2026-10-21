@@ -41,13 +41,6 @@ LOW_TARGET_SIZE = 80 * 1024
 HIGH_COMP_QUALITY = 100
 MIN_COMP_QUALITY = 55
 
-# Every capture uses the night-mode pair: 60 ms exposure, 30 dB gain.
-# Auto exposure and auto gain stay off so later frames cannot change it.
-EXPOSURE_US = 60000
-GAIN_DB = 30
-# Frames integrated before the IR emitter is on are discarded.
-FLUSH_FRAMES = 2
-
 led = LED("LED_BLUE")
 led.off()
 ir_emitter = Pin("P14", Pin.OUT)
@@ -96,12 +89,6 @@ def turn_off_ir():
     _ir_on = False
 
 
-def apply_capture_exposure():
-    """Lock the sensor at 60 ms / 30 dB. Call again after any sensor reset."""
-    sensor.set_auto_gain(False, gain_db=GAIN_DB)
-    sensor.set_auto_exposure(False, exposure_us=EXPOSURE_US)
-
-
 def init_camera_sensor():
     global sensor_initialized
     try:
@@ -110,10 +97,9 @@ def init_camera_sensor():
         sensor.reset()
         sensor.set_pixformat(sensor.GRAYSCALE)
         sensor.set_framesize(sensor.HD)
-        apply_capture_exposure()
         sensor.skip_frames(time=2000)
         sensor_initialized = True
-        logger.info(f"[INIT] Camera/sensor initialized, exposure={EXPOSURE_US}us gain={GAIN_DB}dB")
+        logger.info("[INIT] Camera/sensor initialized")
         return True
     except Exception as e:
         sensor_initialized = False
@@ -402,10 +388,6 @@ def capture_image():
         if not init_camera_sensor():
             logger.error("[IMG] Failed to initialize camera/sensor, will retry later")
             return None, None
-        # Wake can reset the sensor. Re-apply so this frame is 60 ms too.
-        apply_capture_exposure()
-        for _ in range(FLUSH_FRAMES):
-            sensor.snapshot()
         img_snapshot = sensor.snapshot()
         if img_snapshot is None:
             raise Exception("snapshot returned None (camera not ready)")
