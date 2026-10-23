@@ -23,7 +23,9 @@ from config import (
     led_restart_blinker,
     get_machine_port,
     VERSION,
-    get_version_str
+    get_version_str,
+    uses_hybrid_encryption,
+    uses_rsa_encryption
 )
 from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes, get_uptime_seconds, build_dummy_heartbeat_payload, rssi_encode, decode_rssi, encode_snr, decode_snr
 from radio_owner_new import RadioOwner
@@ -34,7 +36,7 @@ from detect import PIR_PIN, turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 from watchdog import start_watchdog, check_watchdog_reset
 from supervisor import supervised
-from message_codec import encode_x_message, decode_x_message
+from message_codec import encode_x_message, decode_x_message, encode_s_message, decode_s_message
 from clock_utils import get_uptime_sec, get_epoch_sec, set_device_epoch_sec, format_epochms_str
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
@@ -49,9 +51,6 @@ app_controller = None
 app_handler = None
 APP_DEBUGGING = False
 
-DECRYPT_IMAGE_ON_HOPS = False
-if not PRODUCTION_MODE:
-    DECRYPT_IMAGE_ON_HOPS = True
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
 USE_PIR_SENSOR = True
@@ -152,17 +151,6 @@ TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
 CHUNK_BURST_SIZE = 50
 CHUNK_BURST_RX_SLEEP = 0.4
 
-
-# Config test for SF7
-LORA_FREQ = 868.0
-LORA_BW = 125             # 125kHz provides better sensitivity than wider bandwidths
-LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-800m
-LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
-LORA_POWER = 22           # Maximum power for strong signal margin
-LORA_PREAMBLE = 10        # Longer preamble for better sync detection
-# Watchmen mesh sync word (not 0x12 hobby-default / not 0x34 LoRaWAN). Same on all devices.
-LORA_SYNC_WORD = 0x2B
-
 gps_module = None
 internet_module = None
 rtc = None
@@ -209,9 +197,9 @@ restmode_last_actvity_time = None
 RESTMODE_LOCK_TIMEOUT = 360  # 6 min
 RESTMODE_INACTIVITY_LIMIT = 180  # 3 min
 
-# Global pre-allocated buffer for image recompilation (120KB)
+# Global pre-allocated buffer for image recompilation (150KB)
 IMAGE_RECOMPILE_BUFFER = None  # Will be initialized at startup
-DATA_BUFFER_SIZE = 120 * 1024 # 120KB
+DATA_BUFFER_SIZE = 150 * 1024 # 150KB
 
 MAX_CHUNK_COUNT = (DATA_BUFFER_SIZE + CHUNK_DATA_SIZE - 1) // CHUNK_DATA_SIZE
 CHUNK_BLOCK_SIZE = 1 + CHUNK_DATA_SIZE  # [len:1][body:45]
@@ -441,7 +429,7 @@ def get_msg_header(msg_typ, creator, dest, msgbytes):
     Build LoRa packet header (msg_uid + CRC-32 of payload).
 
     Args:
-        msg_typ (str): Message type, 1 ASCII byte (e.g. "I", "H", "B").
+        msg_typ (str): Message type, 1 ASCII byte (e.g. "I", "H", "S").
         creator (int): Source node id (encoded to 1 byte).
         dest (int): Destination node id (encoded to 1 byte).
         msgbytes (bytes): Payload; CRC is computed over this only.
@@ -520,12 +508,12 @@ def ellepsis(msg):
         return msg[:100] + "......." + msg[-100:]
     return msg
 
-def ack_needed(msg_typ): # msg_type P is devided in (B,I,E)
+def ack_needed(msg_typ): # files are devided in (S,I,E)
     # Input: msg_typ: str; Output: bool indicating if acknowledgement required
-    if msg_typ in ["A", "W", "N", "I", "K", "U", "V"]:
+    if msg_typ in ["A", "W", "N", "I", "K", "U"]:
         return False
     # H = heartbeat (separate blocks); K = Android/app-origin message
-    if msg_typ in ["H", "B", "E", "C", "Z"]:
+    if msg_typ in ["H", "S", "E", "C", "Z"]:
         return True
     return False
 
@@ -797,15 +785,8 @@ def snapshot_radio_health_window():
 async def start_radio():
     """Own the SX1262 through RadioOwner, as in main_new.py."""
     global radio_owner
-    RadioOwner.LORA_FREQ = LORA_FREQ
-    RadioOwner.LORA_BW = LORA_BW
-    RadioOwner.LORA_SF = LORA_SF
-    RadioOwner.LORA_CR = LORA_CR
-    RadioOwner.LORA_POWER = LORA_POWER
-    RadioOwner.LORA_PREAMBLE = LORA_PREAMBLE
-    RadioOwner.LORA_SYNC_WORD = LORA_SYNC_WORD
     radio_owner = RadioOwner(logger)
-    for msg_typ in ("X", "Y", "B", "E", "D", "A", "W", "I", "H", "Z", "z", "K", "R"):
+    for msg_typ in ("X", "Y", "S", "E", "D", "A", "W", "I", "H", "Z", "z", "K", "R"):
         radio_owner.on_receive(msg_typ, process_message_async)
     asyncio.create_task(supervised("radio_owner", radio_owner.run, critical=True))
     logger.info(f"[RADIO] RadioOwner started, listening (addr={my_addr})")
@@ -1103,8 +1084,7 @@ def encrypt_if_needed(msg_typ, msg):
         # Input: msg_typ: str message type, msg: bytes; Output: bytes (possibly encrypted message)
         if not ENCRYPTION_ENABLED:
             return msg
-        # H = heartbeat, "P": file data
-        if is_hybrid_encrypted(msg_typ):
+        if uses_hybrid_encryption(msg_typ):
             msgbytes = enc.encrypt_hybrid(msg, encnode.get_pub_key())
             logger.debug(f"{msg_typ} : Len msg = {len(msg)}, len msgbytes = {len(msgbytes)}")
             return msgbytes
@@ -1112,20 +1092,6 @@ def encrypt_if_needed(msg_typ, msg):
     except Exception as e:
         logger.error(f"EXCP_ERR: Error in encrypt_if_needed error: {e}\n{logger.exc_str(e)}")
         return None
-
-def is_rsa_encrypted(msg_typ):
-    if not ENCRYPTION_ENABLED:
-        return False
-    if msg_typ in ["*"]: # not data is rsa_encrypted
-        return True
-    return False
-
-def is_hybrid_encrypted(msg_typ):
-    if not ENCRYPTION_ENABLED:
-        return False
-    if msg_typ == "P":
-        return True
-    return False
 
 # === Send Function ===
 
@@ -1149,83 +1115,84 @@ async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messa
 async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
     if not is_lora_ready():
         return False, "LORA not ready"
-    if msg_typ == "P":
-        global radio_sent_succ_count, radio_sent_fail_count
-        filedata_id = get_rand(len=IMG_ID_LEN)
-        if get_transmode_lock(dest, filedata_id, msg_typ, 0, ""): # dummy 0, as we are just sending
-            asyncio.create_task(keep_transmode_lock(dest, filedata_id))
-            # sending start
-            chunks = make_chunks(msgbytes)
-            logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, len:{len(msgbytes)} bytes, filedata_id:{filedata_id}, image_payload in {len(chunks)} chunks")
-            big_succ, _, _, _, _, _ = await send_single_packet("B", creator, f"{filedata_id}:{msg_typ}:{len(chunks)}:{md5}", dest)
-            if not big_succ:
-                # logger.info(f"[CHUNK] Failed sending chunk begin")
-                delete_transmode_lock(dest, filedata_id)
-                return False, "Failed sending chunk begin"
+    
+    global radio_sent_succ_count, radio_sent_fail_count
+    filedata_id = get_rand(len=IMG_ID_LEN)
+    if get_transmode_lock(dest, filedata_id, msg_typ, 0, ""): # dummy 0, as we are just sending
+        asyncio.create_task(keep_transmode_lock(dest, filedata_id))
+        # sending start
+        chunks = make_chunks(msgbytes)
+        start_body = encode_s_message(filedata_id, msg_typ, len(chunks), md5)
+        if not start_body:
+            delete_transmode_lock(dest, filedata_id)
+            return False, "Failed encoding chunk start"
+        logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, len:{len(msgbytes)} bytes, filedata_id:{filedata_id}, image_payload in {len(chunks)} chunks")
+        big_succ, _, _, _, _, _ = await send_single_packet("S", creator, start_body, dest)
+        if not big_succ:
+            # logger.info(f"[CHUNK] Failed sending chunk start")
+            delete_transmode_lock(dest, filedata_id)
+            return False, "Failed sending chunk start"
 
-            for chunk_id in range(len(chunks)):
+        for chunk_id in range(len(chunks)):
+            if check_transmode_lock(dest, filedata_id): # check old logs is still in progress or not
+                if chunk_id % 10 == 0:
+                    if is_restmode_inprogress():
+                        return False, "REST MODE in progress, skipping chunk send"
+                    logger.info(f"⋙ Sending chunks to {dest}, ({chunk_id}-{min(chunk_id+10, len(chunks))})/{len(chunks)}...")
+                await asyncio.sleep(CHUNK_SLEEP)
+                # Adding meta data to chunk bytes, 3 + 2 + 45 = 50 bytes max
+                chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
+                _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
+                if(chunk_id+1) % CHUNK_BURST_SIZE == 0:
+                    logger.info(f"[CHUNK] pause {CHUNK_BURST_RX_SLEEP}s after {chunk_id+1} chunks for RX")
+                    await asyncio.sleep(CHUNK_BURST_RX_SLEEP)
+            else:
+                # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
+                return False, "TRANS MODE ended, timeout error"
+        max_miss_retries = 30
+        for retry_i in range(max_miss_retries):
+            if retry_i == 0:
+                await asyncio.sleep(0.1)  # Faster first check
+            else:
+                await asyncio.sleep(CHUNK_SLEEP)
+            succ, _, _, _, _, missing_chunks = await send_single_packet("E", creator, f"{filedata_id}:{epoch_ms}", dest, retry_count = 5)
+            if not succ:
+                # logger.error(f"[CHUNK] Failed sending chunk end")
+                return False, "Failed sending chunk end"
+            else:
+                if (
+                    missing_chunks is None
+                    or len(missing_chunks) == 0
+                    or (len(missing_chunks) == 1 and missing_chunks[0] == -1)
+                ):
+                    logger.info(f"[CHUNK] Successfully sent all chunks (missing_chunks={missing_chunks})")
+                    delete_transmode_lock(dest, filedata_id)
+                    if retry_i==0:
+                        radio_sent_succ_count += len(chunks)
+                    return True, None
+
+                if retry_i==0:
+                        radio_sent_fail_count += len(missing_chunks)
+                        radio_sent_succ_count += (len(chunks) - len(missing_chunks))
+                logger.info(
+                    f"[CHUNK] Receiver still missing {len(missing_chunks)} chunks after retry {retry_i}: {missing_chunks}"
+                )
                 if check_transmode_lock(dest, filedata_id): # check old logs is still in progress or not
-                    if chunk_id % 10 == 0:
-                        if is_restmode_inprogress():
-                            return False, "REST MODE in progress, skipping chunk send"
-                        logger.info(f"⋙ Sending chunks to {dest}, ({chunk_id}-{min(chunk_id+10, len(chunks))})/{len(chunks)}...")
-                    await asyncio.sleep(CHUNK_SLEEP)
-                    # Adding meta data to chunk bytes, 3 + 2 + 45 = 50 bytes max
-                    chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                    _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
-                    if(chunk_id+1) % CHUNK_BURST_SIZE == 0:
-                        logger.info(f"[CHUNK] pause {CHUNK_BURST_RX_SLEEP}s after {chunk_id+1} chunks for RX")
-                        await asyncio.sleep(CHUNK_BURST_RX_SLEEP)
+                    for idx, chunk_id in enumerate(missing_chunks):
+                        if idx % 10 == 0:
+                            logger.info(f"⋙ Sending missing chunks to {dest}, ({idx}-{min(idx+10, len(missing_chunks))})/{len(missing_chunks)}...")
+                        await asyncio.sleep(CHUNK_SLEEP)
+                        chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
+                        _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
                 else:
                     # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
                     return False, "TRANS MODE ended, timeout error"
-            max_miss_retries = 30
-            for retry_i in range(max_miss_retries):
-                if retry_i == 0:
-                    await asyncio.sleep(0.1)  # Faster first check
-                else:
-                    await asyncio.sleep(CHUNK_SLEEP)
-                succ, _, _, _, _, missing_chunks = await send_single_packet("E", creator, f"{filedata_id}:{epoch_ms}", dest, retry_count = 5)
-                if not succ:
-                    # logger.error(f"[CHUNK] Failed sending chunk end")
-                    return False, "Failed sending chunk end"
-                else:
-                    if (
-                        missing_chunks is None
-                        or len(missing_chunks) == 0
-                        or (len(missing_chunks) == 1 and missing_chunks[0] == -1)
-                    ):
-                        logger.info(f"[CHUNK] Successfully sent all chunks (missing_chunks={missing_chunks})")
-                        delete_transmode_lock(dest, filedata_id)
-                        if retry_i==0:
-                            radio_sent_succ_count += len(chunks)
-                        return True, None
 
-                    if retry_i==0:
-                            radio_sent_fail_count += len(missing_chunks)
-                            radio_sent_succ_count += (len(chunks) - len(missing_chunks))
-                    logger.info(
-                        f"[CHUNK] Receiver still missing {len(missing_chunks)} chunks after retry {retry_i}: {missing_chunks}"
-                    )
-                    if check_transmode_lock(dest, filedata_id): # check old logs is still in progress or not
-                        for idx, chunk_id in enumerate(missing_chunks):
-                            if idx % 10 == 0:
-                                logger.info(f"⋙ Sending missing chunks to {dest}, ({idx}-{min(idx+10, len(missing_chunks))})/{len(missing_chunks)}...")
-                            await asyncio.sleep(CHUNK_SLEEP)
-                            chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                            _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
-                    else:
-                        # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
-                        return False, "TRANS MODE ended, timeout error"
-
-            delete_transmode_lock(dest, filedata_id)
-            return False, f"Failed sending data, max retries reached-{max_miss_retries}"
-        else:
-            logger.warning(f"TRANS MODE already in use, could not get lock...")
-            return False, "TRANS MODE already in use, could not get lock..."
+        delete_transmode_lock(dest, filedata_id)
+        return False, f"Failed sending data, max retries reached-{max_miss_retries}"
     else:
-        logger.warning(f"Invalid message type: {msg_typ}")
-        return False, "Invalid message type"
+        logger.warning(f"TRANS MODE already in use, could not get lock...")
+        return False, "TRANS MODE already in use, could not get lock..."
 
 def get_ack_msg_info(msg_uid):
     global ack_msgs_recd, MSG_UID_LEN
@@ -1279,24 +1246,6 @@ def get_ack_msg_info(msg_uid):
 # Chunk Assembly Helpers
 # ---------------------------------------------------------------------------
 
-def begin_chunk(msgbytes):
-    # Input: msgbytes: bytes; Output: tuple(filedata_id:str, numchunks:int, md5:str) or (None, None, None) on parse error
-    msg_data = msgbytes.decode()
-    parts = msg_data.split(":")
-    if len(parts) != 4:
-        logger.error(f"[CHUNK] begin message unparsable {msg_data}")
-        return (None, None, None)
-    filedata_id = parts[0]
-    msg_typ = parts[1]
-    # epoch_ms = get_epoch_ms()
-    numchunks = int(parts[2])
-    md5 = parts[3]
-
-    # This function just parses the B packet and returns the info
-    logger.info(f"[IMG RX] Received B packet for filedata_id={filedata_id}, expected_chunks={numchunks}")
-    return (filedata_id, msg_typ, numchunks, md5)
-
-
 def get_missing_chunks(filedata_id):
     # Input: filedata_id: str chunk identifier; Output: list of int missing chunk indices
     global trans_chunks_count, trans_data_id
@@ -1326,7 +1275,7 @@ def add_chunk(msgbytes, rssi=None, snr=None):
 
         # Verify this chunk belongs to current transfer
         if filedata_id != trans_data_id:
-            logger.error(f"[CHUNK] no chunks storage for filedata_id={filedata_id}, chunk_index={chunk_id} (chunk may have arrived before B packet or chunks were cleared)")
+            logger.error(f"[CHUNK] no chunks storage for filedata_id={filedata_id}, chunk_index={chunk_id} (chunk may have arrived before S packet or chunks were cleared)")
             return
 
         # Verify chunk_id is within valid range
@@ -1584,7 +1533,7 @@ async def keep_checking_internet():
             await asyncio.sleep(SIM_UNDETECTED_INTERVAL_SEC)
             continue
         
-        if internet_module and not internet_module.configured:
+        if internet_module and not internet_module.gsm_configured:
             logger.error("[CELL] module not configured, re-conguring module...")
             await re_init_tracx_internet()
             await asyncio.sleep(FAILED_RE_CONFIGURE_INTERVAL_SEC)
@@ -1653,16 +1602,12 @@ async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
 async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
     """
     Send one encrypted file/blob to cloud (command center) or to next hop via chunked LoRa.
-    msg_typ: "P" (image/event).
+    msg_typ: F (file/image).
     next_dst: required for mesh nodes; ignored when running_as_cc().
     Returns: sent_succ (bool)
     """
-    if msg_typ not in ("P"):
-        logger.error(f"[FILE] send_file_main: invalid msg_typ={msg_typ}")
-        return False
 
     log_tag = "[IMG]"
-    server_msg_typ = "F"
     file_label = f"{creator}_{epoch_ms}.enc"
     sent_succ = False
 
@@ -1673,13 +1618,13 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
             data_b64_str = enc_msgbytes
         server_payload = {
             "machine_id": creator,
-            "msg_typ": server_msg_typ,
+            "msg_typ": msg_typ,
             "data": data_b64_str,
             "epoch_ms": epoch_ms,
             "enc": encryption_enabled,
         }
         logger.info(f"{log_tag} ⋙⋙⋙ Uploading encrypted image (size: {len(enc_msgbytes)} bytes), file: {creator}_{epoch_ms}")
-        sent_succ = await upload_payload_to_server(server_payload, server_msg_typ, creator)
+        sent_succ = await upload_payload_to_server(server_payload, msg_typ, creator)
         return sent_succ
     else:
         logger.info(f"{log_tag} Sending file msg_typ={msg_typ}, creator={creator}, size={len(enc_msgbytes)} bytes")
@@ -1704,13 +1649,10 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
 
 async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
     """
-    Try send_file_main (cloud or mesh) first. If that fails, persist via db_store->store_image ("P") so the existing send loops can retry later.
+    Try send_file_main (cloud or mesh) first. If that fails, persist via db_store->store_image so the existing send loops can retry later.
     Returns Boolean, True if sent successful or Queued, False otherwise.
     """
     global db_store
-    if msg_typ not in ("P"):
-        logger.error(f"[FILE] send_file_main_or_enqueue: invalid msg_typ={msg_typ}")
-        return False
     if not md5:
         md5 = ubinascii.hexlify(hashlib.md5(enc_msgbytes).digest()).decode()
     transmission_start = get_ms_diff()
@@ -1720,20 +1662,15 @@ async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md
     if sent:
         transmission_end = get_ms_diff()
         transmission_time = transmission_end - transmission_start
-        if msg_typ == "P":
-            db_store.update_img_sent_count(1)
+        db_store.update_img_sent_count(1)
         logger.info(f"[IMG] ✔✔✔ Data[{msg_typ}] transmission completed in {transmission_time/1000:.4f} seconds, file: {creator}_{epoch_ms} to {next_dst or 'Cloud'}")
         return True
     else:
         logger.error(f"[FILE] send failed, enqueuing to db_store")
-        if msg_typ == "P":
-            store_succ, err = db_store.store_image(epoch_ms, creator, 0, enc_msgbytes)
-            if not store_succ:
-                logger.error(f"[FILE] store_image enqueue failed, creator={creator} epoch={epoch_ms}, error={err}")
-            return store_succ
-        else:
-            logger.error(f"[FILE] send_file_main_or_enqueue: invalid msg_typ={msg_typ}")
-            return False
+        store_succ, err = db_store.store_image(epoch_ms, creator, 0, enc_msgbytes)
+        if not store_succ:
+            logger.error(f"[FILE] store_image enqueue failed, creator={creator} epoch={epoch_ms}, error={err}")
+        return store_succ
 
 # ---------------------------------------------------------------------------
 # Heartbeat (H)
@@ -1764,7 +1701,7 @@ async def hb_process(msg_uid, msgbytes, sender):
 
             logger.info(f"[HB] Uploading raw heartbeat data of length {len(msgbytes)} bytes...")
             asyncio.create_task(upload_payload_to_server(server_payload, "H", creator))
-            if ENCRYPTION_ENABLED and is_rsa_encrypted("H"):
+            if ENCRYPTION_ENABLED and uses_rsa_encryption("H"):
                 decrypted_msg = enc.decrypt_rsa(msgbytes, encnode.get_prv_key(creator))
                 logger.info(f"[HB] HB send msg = {decrypted_msg}")
             else:
@@ -1816,7 +1753,7 @@ async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
     global img_capture_count
     try:
         fs_succ = await send_file_main_or_enqueue(
-            "P", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst
+            "F", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst
         )
         if not fs_succ:
             img_capture_count -= 1
@@ -1996,7 +1933,7 @@ async def person_detection_loop():
                         continue
 
                     try:
-                        enc_msgbytes = encrypt_if_needed("P", imgbytes)
+                        enc_msgbytes = encrypt_if_needed("F", imgbytes)
                         try:
                             del imgbytes
                         except NameError as e:
@@ -2028,10 +1965,10 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...\n{logger.exc_str(e)}")
                     led.off()
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
         except Exception as e:
             logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}\n{logger.exc_str(e)}")
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 900)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
 
         finally:
             pir_burst_in_progress = False
@@ -2091,7 +2028,7 @@ async def image_sending_loop():
 
                 transmission_start = get_ms_diff()
                 sent_succ = await send_file_main(
-                    "P", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst
+                    "F", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst
                 )
                 if not sent_succ:
                     store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
@@ -2173,7 +2110,7 @@ def process_message(databytes, rssi=None, snr=None):
     if msg_typ == "H":
         asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
         # Validate heartbeat message payload length for encrypted messages
-        if is_rsa_encrypted("H") and len(msgbytes) != 128:
+        if uses_rsa_encryption("H") and len(msgbytes) != 128:
             logger.error(
                 f"[HB] Invalid payload length: {len(msgbytes)} bytes, expected 128 bytes for encrypted message. "
                 f"MID: {msg_uid}, may be corrupted or incomplete."
@@ -2182,19 +2119,19 @@ def process_message(databytes, rssi=None, snr=None):
             asyncio.create_task(hb_process(msg_uid, msgbytes, sender))
     elif msg_typ == "W":  # wait message
         asyncio.create_task(device_busy_life(sender))
-    elif msg_typ == "B": # TODO need to ignore duplicate images, and send some response in A itself
+    elif msg_typ == "S": # TODO need to ignore duplicate images, and send some response in A itself
         try:
-            filedata_id, msg_typ, numchunks, md5 = begin_chunk(msgbytes) # msg_typ as "P"
+            filedata_id, msg_typ, numchunks, md5 = decode_s_message(msgbytes)
             if filedata_id is None or numchunks is None:
-                logger.error(f"[CHUNK] Invalid B packet, cannot get filedata_id/numchunks")
+                logger.error(f"[CHUNK] Invalid S packet, cannot get filedata_id/numchunks")
                 return False
             if is_install_mode:
-                logger.warmning(f"[CHUNK] TRANS MODE not allowed in install mode, ignoring 'B'...")
+                logger.warning(f"[CHUNK] TRANS MODE not allowed in install mode, ignoring 'S'...")
                 return False
-            # Check if this is a duplicate B packet for the same transfer
+            # Check if this is a duplicate S packet for the same transfer
             if check_transmode_lock(sender, filedata_id):
-                # Same sender and filedata_id - send ACK anyway (duplicate begin packet)
-                logger.debug(f"[CHUNK] Duplicate B packet for same transfer, sending ACK")
+                # Same sender and filedata_id - send ACK anyway (duplicate start packet)
+                logger.debug(f"[CHUNK] Duplicate S packet for same transfer, sending ACK")
                 asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
             elif db_store.storage_available(creator):
                 if get_transmode_lock(sender, filedata_id, msg_typ, numchunks, md5):
@@ -2260,10 +2197,9 @@ def process_message(databytes, rssi=None, snr=None):
                 try:
                     async def _chunk_end_send_or_enqueue(trans_msg_typ_curr, trans_md5_curr):
                         nonlocal recompiled_msgbytes
-                        global db_store
                         next_dst = next_device_in_spath() if running_as_unit() else None
                         ok = await send_file_main_or_enqueue(
-                            trans_msg_typ_curr, creator, recompiled_msgbytes, epoch_ms, trans_md5_curr, ENCRYPTION_ENABLED, next_dst
+                            "F", creator, recompiled_msgbytes, epoch_ms, trans_md5_curr, ENCRYPTION_ENABLED, next_dst
                         )
                         if not ok:
                             logger.error(
@@ -2276,26 +2212,6 @@ def process_message(databytes, rssi=None, snr=None):
                             gc.collect()
                             return
                         logger.info(f"[CHUNK] file type={trans_msg_typ_curr} sent or queued for {creator}_{epoch_ms}.enc")
-
-                        global DECRYPT_IMAGE_ON_HOPS
-                        if trans_msg_typ_curr == "P" and DECRYPT_IMAGE_ON_HOPS:
-                            try:
-                                img_bytes = None
-                                img = None
-                                try:
-                                    img_bytes = enc.decrypt_hybrid(recompiled_msgbytes, encnode.get_prv_key(creator))
-                                    img = image.Image(320, 240, image.JPEG, buffer=img_bytes)
-                                    db_store.store_image_raw(epoch_ms, creator, img)
-                                    logger.info(f"[IMG RX] Saved raw image: {creator}_{epoch_ms}_raw.jpg: raw size = {len(img_bytes)} bytes")
-                                except Exception as e:
-                                    logger.error(f"EXCP_ERR: [IMG RX] Failed to decrypt/save raw image: {e}\n{logger.exc_str(e)}")
-                                finally:
-                                    if img_bytes is not None:
-                                        del img_bytes
-                                    if img is not None:
-                                        del img
-                            except Exception as e:
-                                logger.error(f"EXCP_ERR: [IMG RX] Failed to decrypt/save raw image: {e}\n{logger.exc_str(e)}")
                         try:
                             del recompiled_msgbytes
                         except Exception as e:
@@ -2362,6 +2278,7 @@ def process_message(databytes, rssi=None, snr=None):
                 asyncio.create_task(send_msg("J", my_addr, b"recvdExitInstallMode", sender))
         elif msgstr == "get_device_status":
             connection_status = app_controller.check_connection()
+            # Install mode, production mode
             msg = {"M": "I" if is_install_mode else "P", "Wi": connection_status["wifi_connected"], "So": connection_status["socket_connected"]}
             asyncio.create_task(send_msg("J", my_addr, json.dumps(msg).encode(), sender))
         else:
@@ -2438,7 +2355,7 @@ def build_heartbeat_payload():  # HARD limit is 50 bytes
 
         hbmsg_bytes += int_to_nbytes(radio_succ_count, 3)
         hbmsg_bytes += int_to_nbytes(radio_fail_count, 3)
-        if internet_module and internet_module.configured:
+        if internet_module and internet_module.gsm_configured:
             hbmsg_bytes += int_to_nbytes(internet_module.get_upload_success_count(), 3)
             hbmsg_bytes += int_to_nbytes(internet_module.get_upload_fail_count(), 3)
         else:

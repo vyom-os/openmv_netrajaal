@@ -171,13 +171,14 @@ class TxTicket:
 # ======================================================================
 class RadioOwner:
 
-    # SF7 / 125 kHz. Same modem settings on every device.
+    # Config test for SF7. Same modem settings on every device.
     LORA_FREQ = 868.0
-    LORA_BW = 250
-    LORA_SF = 7
-    LORA_CR = 6
-    LORA_POWER = 22
-    LORA_PREAMBLE = 10
+    LORA_BW = 125             # 125kHz provides better sensitivity than wider bandwidths
+    LORA_SF = 7               # SF9: Medium speed, excellent range margin for 600-800m
+    LORA_CR = 6               # CR 4/6: Good error correction for reliable communication
+    LORA_POWER = 22           # Maximum power for strong signal margin
+    LORA_PREAMBLE = 10        # Longer preamble for better sync detection
+    # Watchmen mesh sync word (not 0x12 hobby-default / not 0x34 LoRaWAN). Same on all devices.
     LORA_SYNC_WORD = 0x2B
 
     def __init__(self, logger, rx_sink=None, on_fatal=None, rx_limit=64, tx_limit=32):

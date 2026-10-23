@@ -2,6 +2,7 @@ import struct
 import gc
 import utime
 import machine
+import random
 
 # Binary header prepended to JPEG bytes before base64 upload (API strips first N bytes).
 # 2-byte LE payload length + 20-byte payload (lat, lon, epoch, image_id, type).
@@ -203,6 +204,13 @@ def decode_snr(snr):
     """
     return int(snr) - 10
 
+
+def get_rand(len=3):
+    # Input: None; Output: str random 3-letter uppercase identifier
+    rstr = ""
+    for i in range(len):
+        rstr += chr(65+random.randint(0,25))
+    return rstr
 
 if __name__ == "__main__":
     EXPECTED_LEN = 44

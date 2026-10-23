@@ -95,8 +95,8 @@ my_addr = UID_TO_ADDR.get(uid)
 # XX.XX.X
 # 02.00.4
 major = 2  # (0-63)
-minor = 5  # (0-99)
-patch = 9  # (0-9)
+minor = 6  # (0-99)
+patch = 0  # (0-9)
 # version as integer value, max_val = 64_999 < 65_535 (2 bytes)
 VERSION = major * 1_000 + minor * 10 + patch
 
@@ -126,7 +126,10 @@ def uses_rsa_encryption(msg_type):
 def uses_hybrid_encryption(msg_type):
     if not ENCRYPTION_ENABLED:
         return False
-    if msg_type == "P":
+    if msg_type == "F":
+        return True
+    elif msg_type == "P":
+        print("ERROR: P is not supported for hybrid encryption, has been remove please update your code")
         return True
     return False
 
@@ -144,23 +147,32 @@ async def led_restart_blinker():
 # flash memory config store
 store = ConfigStore()
 def get_key_value(key: str):
-    saved_state = store.load()
-    if saved_state:
-        json_data = json.loads(saved_state)
-        result = json_data.get(key, None)
-    else:
-        result = None
-    return result
+    try:
+        saved_state = store.load()
+        if saved_state:
+            json_data = json.loads(saved_state)
+            result = json_data.get(key, None)
+        else:
+            result = None
+        return result
+    except Exception as e:
+        print(f"Error in get_key_value: {str(e)}")
+        return False
     
-def set_key_value(key: str, value: any):
-    saved_state = store.load()
-    if saved_state:
-        json_data = json.loads(saved_state)
-        json_data[key] = value
-        store.save(json.dumps(json_data).encode())
-    else:
-        json_data = {key: value}
-        store.save(json.dumps(json_data).encode())
+def set_key_value(key: str, value: any) -> bool:
+    try:
+        saved_state = store.load()
+        if saved_state:
+            json_data = json.loads(saved_state)
+            json_data[key] = value
+            store.save(json.dumps(json_data).encode())
+        else:
+            json_data = {key: value}
+            store.save(json.dumps(json_data).encode())
+        return True
+    except Exception as e:
+        print(f"Error in set_key_value: {str(e)}")
+        return False
 
 # ============================================================
 # MACHINE GLOBAL ROOT STORAGE (deployment_id, logs, GPS, etc.)
@@ -204,6 +216,36 @@ def get_gps_location():
             set_key_value('gps_location', None)
             return None, None, 0
     return None, None, 0
+
+def set_base_image(epoch_ms, jpeg_bytes):
+    """Replace any stored base image. Returns True on success, False otherwise."""
+    try:
+        if epoch_ms is None or not jpeg_bytes:
+            return False
+        jpeg_b64 = binascii.b2a_base64(jpeg_bytes).rstrip().decode()
+        set_key_value('base_image', {'epoch_ms': int(epoch_ms), 'jpeg': jpeg_b64})
+        return True
+    except Exception as e:
+        print(f"Error in set_base_image: {str(e)}")
+        set_key_value('base_image', None)
+        return False
+
+def get_base_image():
+    """Return (epoch_ms, jpeg_bytes), or (None, None) if none is stored."""
+    base_image = get_key_value('base_image')
+    if base_image:
+        try:
+            jpeg_bytes = binascii.a2b_base64(base_image['jpeg'])
+            return base_image['epoch_ms'], jpeg_bytes
+        except Exception as e:
+            print(f"Error in get_base_image: {str(e)}")
+            set_key_value('base_image', None)
+            return None, None
+    return None, None
+
+def clear_base_image():
+    """Clear any stored base image."""
+    set_key_value('base_image', None)
 
 def get_machine_uid():
     """Return unique machine UID"""
@@ -320,7 +362,7 @@ def main():
     print("UID: ", uid)
     print("My address: ", get_my_addr())
     print("Encryption enabled: ", ENCRYPTION_ENABLED)
-    print("Hybrid encryption enabled: ", uses_hybrid_encryption("P"))
+    print("Hybrid encryption enabled: ", uses_hybrid_encryption("F"))
     print("RSA encryption enabled: ", uses_rsa_encryption("*"))
 
     # machine time test
@@ -341,6 +383,21 @@ def main():
         print("pvt_key str len:", len(str(pvt)))
 
     print("======================================\n\n")
+    
+    
+    # base image: report what is stored, then clear it
+    before_ms, before_jpeg = get_base_image()
+    if before_jpeg:
+        print("base image before: epoch_ms=", before_ms, "bytes=", len(before_jpeg))
+    else:
+        print("base image before: none")
+    clear_base_image()
+    after_ms, after_jpeg = get_base_image()
+    if after_jpeg:
+        print("base image after: epoch_ms=", after_ms, "bytes=", len(after_jpeg))
+    else:
+        print("base image after: none")
+    print("Base image cleared")
 
 if __name__ == "__main__":
     main()

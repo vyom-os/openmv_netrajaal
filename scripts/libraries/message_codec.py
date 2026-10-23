@@ -1,4 +1,5 @@
-from utils import int_to_nbytes
+import struct
+from utils import get_rand, int_to_nbytes
 import ubinascii as _b64mod
 import logger
 
@@ -121,6 +122,39 @@ X_EPOCH_SEC_BYTES = 5
 X_PAYLOAD_BYTES = DEVICE_ID_BYTES + X_EPOCH_SEC_BYTES  # 6
 
 
+def _encode_node_id(node_id: int):
+    if not 0 <= node_id <= 255:
+        raise ValueError("node id {} out of range (0-255)".format(node_id))
+    return bytes((node_id,))
+
+
+def _encode_dest(dest):
+    if dest in (0, 65535):
+        return b"*"
+    return _encode_node_id(dest)
+
+
+def create_msg_uid(creator, sender, dest, msgbytes, msg_typ="X"):
+    """
+    Build LoRa packet header (msg_uid + CRC-32 of payload).
+
+    Same layout as main.get_msg_header. Sender is an argument, so this
+    does not use the global node address.
+
+    Returns (msg_uid, crc_checksum): 7 + 4 bytes.
+    """
+    msg_uid = (
+        msg_typ.encode()              # 1 byte
+        + _encode_node_id(creator)    # 1 byte
+        + _encode_node_id(sender)     # 1 byte
+        + _encode_dest(dest)          # 1 byte, "*" when dest is 0 or 65535
+        + get_rand(len=3).encode()    # 3 bytes
+    )
+    crc = _b64mod.crc32(msgbytes) & 0xFFFFFFFF
+    crc_checksum = struct.pack(">I", crc)
+    return msg_uid, crc_checksum
+
+
 def encode_x_message(device_id, epoch_sec):
     """X scan payload: device_id (1 byte) + epoch_sec (5 bytes). Returns None on bad input."""
     try:
@@ -155,3 +189,35 @@ def decode_x_message(msgbytes):
     except Exception as e:
         logger.error("Failed to decode X message: {}".format(e))
         return None, None
+
+
+def encode_s_message(filedata_id, msg_typ, numchunks, md5):
+    """S start payload: filedata_id:msg_typ:numchunks:md5. Returns None on bad input."""
+    try:
+        if filedata_id is None or msg_typ is None:
+            raise ValueError("filedata_id and msg_typ are required")
+        md5 = "" if md5 is None else md5
+        text = "{}:{}:{}:{}".format(filedata_id, msg_typ, numchunks, md5)
+        return text.encode()
+    except Exception as e:
+        logger.error("Failed to encode S message: {}".format(e))
+        return None
+
+
+def decode_s_message(msgbytes):
+    """Return (filedata_id, msg_typ, numchunks, md5). defaults to C."""
+    try:
+        msg_data = msgbytes.decode()
+        parts = msg_data.split(":")
+        if len(parts) != 4:
+            logger.error(f"[CHUNK] start message unparsable {msg_data}")
+            return None, None, None, None
+        filedata_id = parts[0]
+        msg_typ = parts[1]
+        numchunks = int(parts[2])
+        md5 = parts[3]
+        logger.info(f"[IMG RX] Received S packet for filedata_id={filedata_id}, expected_chunks={numchunks}")
+        return filedata_id, msg_typ, numchunks, md5
+    except Exception as e:
+        logger.error("Failed to decode S message: {}".format(e))
+        return None, None, None, None
