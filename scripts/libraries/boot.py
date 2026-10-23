@@ -25,9 +25,11 @@ from config import (
     VERSION,
     get_version_str,
     uses_hybrid_encryption,
-    uses_rsa_encryption
+    uses_rsa_encryption,
+    get_base_image,
+    set_base_image,
 )
-from utils import int_to_nbytes, pack_image_meta_header, get_free_memory, get_uptime_minutes, get_uptime_seconds, build_dummy_heartbeat_payload, rssi_encode, decode_rssi, encode_snr, decode_snr
+from utils import int_to_nbytes, pack_image_meta_header, IMAGE_META_HEADER_LEN, get_free_memory, get_uptime_minutes, get_uptime_seconds, build_dummy_heartbeat_payload, rssi_encode, decode_rssi, encode_snr, decode_snr
 from radio_owner_new import RadioOwner
 from gps_driver import GPSDriver
 from internet_driver import InternetDriver, UART_HEALTH_INTERVAL_SEC, SIM_UNDETECTED_INTERVAL_SEC, FAILED_RE_CONFIGURE_INTERVAL_SEC, FAILED_INTERNET_RETRY_INTERVAL_SEC_CC, FAILED_INTERNET_RETRY_INTERVAL_SEC_UNIT, SUCCESS_INTERNET_RETRY_INTERVAL_SEC, hardware_reset_gsm
@@ -37,6 +39,7 @@ import power_mgmt
 from watchdog import start_watchdog, check_watchdog_reset
 from supervisor import supervised
 from message_codec import encode_x_message, decode_x_message, encode_s_message, decode_s_message
+import vb_encode
 from clock_utils import get_uptime_sec, get_epoch_sec, set_device_epoch_sec, format_epochms_str
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
@@ -53,7 +56,7 @@ APP_DEBUGGING = False
 
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
-USE_PIR_SENSOR = True
+USE_PIR_SENSOR = False
 sensor_initialized = False
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
@@ -186,6 +189,7 @@ trans_msg_typ = None
 trans_chunks_count = 0
 trans_chunk_epoch_ms = None
 trans_chunk_md5 = None
+trans_file_type = None  # "B" base, "C" cropped; base_image_id lives in the image header later
 trans_prev_data_id = None
 trans_last_actvity_uptime = None
 img_chunk_rssi_snr = []  # RSSI/SNR of image I-packets since last progress log
@@ -525,9 +529,10 @@ URL = "https://api.vyomiq.io/watchmen-detect/"
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # TRANSFER MODE Lock
 
-def get_transmode_lock(device_id, filedata_id, msg_typ, chunk_count, md5): # check and just lock for image
+def get_transmode_lock(device_id, filedata_id, msg_typ, chunk_count, md5, file_type=None): # check and just lock for image
     global trans_in_progress, trans_paired_device
     global trans_data_id, trans_msg_typ, trans_chunks_count, trans_chunk_epoch_ms, trans_chunk_md5
+    global trans_file_type
     global img_chunk_rssi_snr, img_last_logged_received
     if is_install_mode: # safty return
         logger.error(f"[IMG] TRANS MODE not allowed in install mode")
@@ -535,7 +540,7 @@ def get_transmode_lock(device_id, filedata_id, msg_typ, chunk_count, md5): # che
     if is_restmode_inprogress():
         logger.error(f"[IMG] TRANS MODE not allowed in rest mode")
         return False
-    if trans_in_progress == True: # TRANS MODE already in use
+    if trans_in_progress == True:
         return False
     if chunk_count > MAX_CHUNK_COUNT:
         logger.error(
@@ -549,6 +554,7 @@ def get_transmode_lock(device_id, filedata_id, msg_typ, chunk_count, md5): # che
     trans_msg_typ = msg_typ
     trans_chunks_count = chunk_count
     trans_chunk_md5 = md5
+    trans_file_type = file_type if file_type else "B"
     img_chunk_rssi_snr = []
     img_last_logged_received = 0
 
@@ -618,6 +624,7 @@ def delete_transmode_lock(device_id, filedata_id, trans_success=False): # called
     # Input: None; Output: None (clears trans_in_progress flag)
     global trans_in_progress, trans_paired_device
     global trans_data_id, trans_msg_typ, trans_chunks_count, trans_chunk_epoch_ms, trans_prev_data_id, trans_chunk_md5
+    global trans_file_type
     global trans_last_actvity_uptime, img_chunk_rssi_snr, img_last_logged_received
     if trans_in_progress and trans_paired_device == device_id and trans_data_id == filedata_id:  # TODO, these has to handled using someuniqueness
         logger.info(f"[IMG] ●●●●●●●●●●❯❯ TRANS MODE ended for device:{device_id}, msg_typ:{trans_msg_typ}, filedata_id:{filedata_id}, by logic ❮❮●●●●●●●●●●")
@@ -629,6 +636,7 @@ def delete_transmode_lock(device_id, filedata_id, trans_success=False): # called
         trans_msg_typ = None
         trans_chunks_count = 0
         trans_chunk_md5 = None
+        trans_file_type = None
         trans_last_actvity_uptime = None
         img_chunk_rssi_snr = []
         img_last_logged_received = 0
@@ -786,7 +794,7 @@ async def start_radio():
     """Own the SX1262 through RadioOwner, as in main_new.py."""
     global radio_owner
     radio_owner = RadioOwner(logger)
-    for msg_typ in ("X", "Y", "S", "E", "D", "A", "W", "I", "H", "Z", "z", "K", "R"):
+    for msg_typ in ("X", "Y", "S", "E", "D", "A", "W", "I", "H", "Z", "z", "K", "R", "U"):
         radio_owner.on_receive(msg_typ, process_message_async)
     asyncio.create_task(supervised("radio_owner", radio_owner.run, critical=True))
     logger.info(f"[RADIO] RadioOwner started, listening (addr={my_addr})")
@@ -1112,21 +1120,21 @@ async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messa
         logger.error(f"EXCP_ERR: [LORA] Exception in send_msg: {e}\n{logger.exc_str(e)}")
         return False, None, None, None, None
 
-async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
+async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5, file_type="B"): # file sending
     if not is_lora_ready():
         return False, "LORA not ready"
     
     global radio_sent_succ_count, radio_sent_fail_count
     filedata_id = get_rand(len=IMG_ID_LEN)
-    if get_transmode_lock(dest, filedata_id, msg_typ, 0, ""): # dummy 0, as we are just sending
+    if get_transmode_lock(dest, filedata_id, msg_typ, 0, "", file_type): # dummy 0, as we are just sending
         asyncio.create_task(keep_transmode_lock(dest, filedata_id))
         # sending start
         chunks = make_chunks(msgbytes)
-        start_body = encode_s_message(filedata_id, msg_typ, len(chunks), md5)
+        start_body = encode_s_message(filedata_id, msg_typ, len(chunks), md5, trans_file_type)
         if not start_body:
             delete_transmode_lock(dest, filedata_id)
             return False, "Failed encoding chunk start"
-        logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, len:{len(msgbytes)} bytes, filedata_id:{filedata_id}, image_payload in {len(chunks)} chunks")
+        logger.info(f"[⋙ sending....] dest={dest}, msg_typ:{msg_typ}, file_type:{trans_file_type}, len:{len(msgbytes)} bytes, filedata_id:{filedata_id}, image_payload in {len(chunks)} chunks")
         big_succ, _, _, _, _, _ = await send_single_packet("S", creator, start_body, dest)
         if not big_succ:
             # logger.info(f"[CHUNK] Failed sending chunk start")
@@ -1599,13 +1607,16 @@ async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
         return False
 
 
-async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
+async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst, file_type="B"):
     """
     Send one encrypted file/blob to cloud (command center) or to next hop via chunked LoRa.
     msg_typ: F (file/image).
+    file_type: "B" base, "C" cropped (base_image_id is inside the encrypted header).
     next_dst: required for mesh nodes; ignored when running_as_cc().
     Returns: sent_succ (bool)
     """
+    if file_type not in ("B", "C"):
+        file_type = "B"
 
     log_tag = "[IMG]"
     file_label = f"{creator}_{epoch_ms}.enc"
@@ -1618,13 +1629,15 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
             data_b64_str = enc_msgbytes
         server_payload = {
             "machine_id": creator,
-            "msg_typ": msg_typ,
+            "msg_typ": "F2",
             "data": data_b64_str,
             "epoch_ms": epoch_ms,
             "enc": encryption_enabled,
         }
-        logger.info(f"{log_tag} ⋙⋙⋙ Uploading encrypted image (size: {len(enc_msgbytes)} bytes), file: {creator}_{epoch_ms}")
+        logger.info(f"{log_tag} ⋙⋙⋙ Uploading encrypted image (size: {len(enc_msgbytes)} bytes), file: {creator}_{epoch_ms}, file_type={file_type}")
         sent_succ = await upload_payload_to_server(server_payload, msg_typ, creator)
+        if sent_succ and creator != my_addr and file_type == "B":
+            asyncio.create_task(proccess_u_message(creator, epoch_ms))
         return sent_succ
     else:
         logger.info(f"{log_tag} Sending file msg_typ={msg_typ}, creator={creator}, size={len(enc_msgbytes)} bytes")
@@ -1635,7 +1648,9 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
                     logger.warning(f"{log_tag} Device {next_dst} is busy, skipping send")
                     sent_succ = False
                 else:
-                    sent_succ, err_msg = await send_msg_big(msg_typ, creator, enc_msgbytes, next_dst, epoch_ms, md5)
+                    sent_succ, err_msg = await send_msg_big(
+                        msg_typ, creator, enc_msgbytes, next_dst, epoch_ms, md5, file_type
+                    )
                     if not sent_succ:
                         logger.error(f"{log_tag} forwarding to {next_dst} failed, error: {err_msg}")
             else:
@@ -1647,27 +1662,58 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
     return sent_succ
 
 
-async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
+async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst, file_type="B"):
     """
     Try send_file_main (cloud or mesh) first. If that fails, persist via db_store->store_image so the existing send loops can retry later.
     Returns Boolean, True if sent successful or Queued, False otherwise.
     """
     global db_store
+    if file_type not in ("B", "C"):
+        file_type = "B"
     if not md5:
         md5 = ubinascii.hexlify(hashlib.md5(enc_msgbytes).digest()).decode()
     transmission_start = get_ms_diff()
     sent = False
-    if not is_restmode_inprogress():
-        sent = await send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst)
+    ready_to_send = running_as_cc() or not trans_in_progress
+    if not is_restmode_inprogress() and ready_to_send:
+        sent = await send_file_main(
+            msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst, file_type
+        )
     if sent:
         transmission_end = get_ms_diff()
         transmission_time = transmission_end - transmission_start
         db_store.update_img_sent_count(1)
         logger.info(f"[IMG] ✔✔✔ Data[{msg_typ}] transmission completed in {transmission_time/1000:.4f} seconds, file: {creator}_{epoch_ms} to {next_dst or 'Cloud'}")
+        if creator == my_addr:
+            if running_as_cc():
+                if file_type == "B":
+                    try:
+                        if ENCRYPTION_ENABLED and uses_hybrid_encryption("F"):
+                            imgbytes = enc.decrypt_hybrid(enc_msgbytes, encnode.get_prv_key(creator))
+                        else:
+                            imgbytes = enc_msgbytes
+                        raw_jpeg_bytes = imgbytes[IMAGE_META_HEADER_LEN:]
+                        if set_base_image(epoch_ms, raw_jpeg_bytes):
+                            logger.info(f"[IMG] =======> New base image {creator}_{epoch_ms} saved to flash successfully <=======")
+                        else:
+                            logger.error(f"[IMG] failed to save base image {creator}_{epoch_ms}")
+                    except Exception as e:
+                        logger.error(f"EXCP_ERR: [IMG] failed to set base image {creator}_{epoch_ms}: {e}\n{logger.exc_str(e)}")
+                else:
+                    logger.info(f"[IMG] cropped image {creator}_{epoch_ms} uploaded, not saved as base image")
+            else:
+                store_succ, err = db_store.store_image(
+                    epoch_ms, creator, 0, enc_msgbytes, file_type=file_type, is_sent=True
+                )
+                if not store_succ:
+                    logger.error(f"[IMG] failed to keep own sent image {creator}_{epoch_ms}.enc, error={err}")
         return True
     else:
-        logger.error(f"[FILE] send failed, enqueuing to db_store")
-        store_succ, err = db_store.store_image(epoch_ms, creator, 0, enc_msgbytes)
+        if ready_to_send:
+            logger.error(f"[FILE] send failed, enqueuing to db_store")
+        store_succ, err = db_store.store_image(
+            epoch_ms, creator, 0, enc_msgbytes, file_type=file_type
+        )
         if not store_succ:
             logger.error(f"[FILE] store_image enqueue failed, creator={creator} epoch={epoch_ms}, error={err}")
         return store_succ
@@ -1721,6 +1767,35 @@ async def hb_process(msg_uid, msgbytes, sender):
         else:
             logger.error(f"[HB] can't forward HB because I dont have next device in spath yet")
 
+async def proccess_u_message(creator, epoch_ms):
+    try:
+        if creator == my_addr:
+            if internet_module and internet_module.has_internet:
+                logger.info("No need to save base image in case of cc")
+            else:
+                logger.info(f"Fetching image from db_store for {creator}_{epoch_ms}")
+                _, enc_msgbytes = db_store.fetch_image(epoch_ms, creator)
+                if enc_msgbytes is None:
+                    logger.error(f"[U] no local image for {creator}_{epoch_ms}, skipping this...")
+                    return
+                if ENCRYPTION_ENABLED and uses_hybrid_encryption("F"):
+                    imgbytes = enc.decrypt_hybrid(enc_msgbytes, encnode.get_prv_key(creator))
+                else:
+                    imgbytes = enc_msgbytes
+                raw_jpeg_bytes = imgbytes[IMAGE_META_HEADER_LEN:]
+                if set_base_image(epoch_ms, raw_jpeg_bytes):
+                    logger.info(f"[U] =======> New base image {creator}_{epoch_ms} saved to flash successfully <=======")
+                else:
+                    logger.error(f"[U] failed to save base image {creator}_{epoch_ms}")
+        else:
+            logger.info(f"[U] Received U message from {creator}")
+            payload = int_to_nbytes(epoch_ms, 6)
+            for _ in range(3):
+                await send_msg("U", creator, payload, 65535)
+    except Exception as e:
+        logger.error(f"EXCP_ERR: [U] Failed to process U message: {e}\n{logger.exc_str(e)}")
+
+
 # # @@@@@@@@@@@@@@@@@@@@
 # # Method 2
 # # @@@@@@@@@@@@@@@@@@@@
@@ -1746,14 +1821,16 @@ def pir_interrupt_handler(pin):
         pir_trigger_event.set()
         # logger.info(f"[PIR] Motion detected (interrupt)")
 
-async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
+async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst, file_type="B"):
     """Run send/enqueue off the capture path; apply img counters when it finishes.
     Returns True when the file was sent or queued, False otherwise.
+    file_type: "B" base / "C" cropped (base_image_id is in the encrypted header).
     """
     global img_capture_count
     try:
         fs_succ = await send_file_main_or_enqueue(
-            "F", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst
+            "F", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst,
+            file_type=file_type,
         )
         if not fs_succ:
             img_capture_count -= 1
@@ -1803,7 +1880,7 @@ def check_compression_for_cc():
     compression_updated_for_cc = True
 
 def capture_image(compress_quality=None):
-    """Capture one image, store raw copy, compress, and auto-adjust global quality."""
+    """Capture one image, compress to JPEG bytes, free snapshot, return (None, jpeg, epoch)."""
     global img_capture_count, img_file_counter, global_comp_quality
     global db_store
     global HIGH_COMP_QUALITY, MIN_COMP_QUALITY, HIGH_TARGET_SIZE, LOW_TARGET_SIZE
@@ -1811,6 +1888,7 @@ def capture_image(compress_quality=None):
     # Burst path wakes once before the loop; this is a no-op if already awake.
     power_mgmt.camera_wake()
     turn_ON_IR_emitter()
+    img_snapshot = None
     try:
         if not init_camera_sensor():
             logger.error("[PIR] Failed to initialize camera/sensor, will be retrying later...")
@@ -1844,12 +1922,19 @@ def capture_image(compress_quality=None):
             if size < LOW_TARGET_SIZE:
                 global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + 5)
 
-        return img_snapshot, jpeg_bytearray, event_epoch_ms
+        return None, jpeg_bytearray, event_epoch_ms
     except Exception as e:
         logger.error(f"EXCP_ERR: [PIR] Failed to capture image: {e}\n{logger.exc_str(e)}")
         return None, None, None
     finally:
         turn_OFF_IR_emitter()
+        if img_snapshot is not None:
+            try:
+                del img_snapshot
+            except Exception:
+                pass
+            img_snapshot = None
+            gc.collect()
         # Do not camera_sleep here — stay awake for remaining burst frames.
 
 async def person_detection_loop():
@@ -1890,6 +1975,7 @@ async def person_detection_loop():
 
         try:
             power_mgmt.camera_wake()  # wake + skip_frames once for whole burst
+            base_epoch_ms, base_jpeg_imgbytes = None, None
             for i in range(BURST_SIZE):
                 img_snapshot = None
                 sleep_in_bursts = BURST_SLEEP_TIME if i<BURST_SIZE-1 else 0
@@ -1897,16 +1983,54 @@ async def person_detection_loop():
                     led.on()
                     logger.info(f"[PIR] 🅾🅾🅾🅾🅾🅾❯❯ Capturing {i+1}/{BURST_SIZE} image... ❮❮🅾🅾🅾🅾🅾🅾")
                     img_snapshot, imgbytes, event_epoch_ms = capture_image()
-                    if img_snapshot is None or imgbytes is None or event_epoch_ms is None:
+                    if imgbytes is None or event_epoch_ms is None:
                         logger.error(f"[PIR] Failed to capture image: ")
                         img_capture_count -= 1
                         led.off()
                         continue
 
-                    db_store.store_image_raw(event_epoch_ms, my_addr, img_snapshot)
-                    if img_snapshot is not None:
-                        del img_snapshot
-                        img_snapshot = None
+                    # snapshot is freed inside capture_image(); raw save needs an image object
+                    # if img_snapshot is not None:
+                    #     db_store.store_image_raw(event_epoch_ms, my_addr, img_snapshot)
+
+                    send_base_image_id = None
+                    file_type = "B"
+                    if base_epoch_ms is None:
+                        base_epoch_ms, base_jpeg_imgbytes = get_base_image()
+                    if base_epoch_ms is not None and base_jpeg_imgbytes and imgbytes is not None:
+                        try:
+                            send_full, payload, pct_change = vb_encode.encode_image(
+                                imgbytes, base_jpeg_imgbytes
+                            )
+                            if send_full:
+                                logger.info(
+                                    f"[IMG] difference too large ({pct_change}%), "
+                                    f"sending full image {len(imgbytes)}B"
+                                )
+                            else:  # difference is small
+                                if pct_change == 0:
+                                    logger.info(
+                                        f"[IMG] no change, with the base image, skipiing this image {len(imgbytes)}B"
+                                    )
+                                    continue
+                                if running_as_unit():
+                                    logger.info(
+                                        f"[IMG] sending delta {len(payload)}B, "
+                                        f"{pct_change}% changed, base={base_epoch_ms}"
+                                    )
+                                    imgbytes = payload
+                                    send_base_image_id = base_epoch_ms
+                                    file_type = "C"
+                                else:
+                                    logger.info(
+                                        f"[IMG] sending full image {len(imgbytes)}B even though "
+                                        f"difference is {pct_change}%, base={base_epoch_ms}"
+                                    )
+                            
+                        except Exception as e:
+                            logger.error(f"EXCP_ERR: [IMG] delta encode failed, sending full image: {e}\n{logger.exc_str(e)}")
+                    else:
+                        logger.info("[IMG] no base image, sending full image")
 
                     image_id = get_rand(3)
                     lat = 0
@@ -1923,8 +2047,10 @@ async def person_detection_loop():
 
                     try:
                         logger.info(f"[PIR] GPS Data LAT={lat}, LON={lon}")
+                        global global_comp_quality
                         imgbytes = pack_image_meta_header(
-                            lat, lon, event_epoch_ms, image_id, "F"
+                            lat, lon, event_epoch_ms, image_id, file_type,
+                            global_comp_quality, send_base_image_id
                         ) + imgbytes
                     except Exception as e:
                         logger.error(f"EXCP_ERR: [PIR] Failed to pack image meta header: {e}\n{logger.exc_str(e)}")
@@ -1944,7 +2070,7 @@ async def person_detection_loop():
                             led.off()
                             continue
                         next_dst = next_device_in_spath() if running_as_unit() else None
-                        asyncio.create_task(_send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst))
+                        asyncio.create_task(_send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst, file_type))
 
                     except Exception as e:
                         logger.error(f"EXCP_ERR: [PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}\n{logger.exc_str(e)}")
@@ -1965,10 +2091,10 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...\n{logger.exc_str(e)}")
                     led.off()
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 80)
         except Exception as e:
             logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}\n{logger.exc_str(e)}")
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 80)
 
         finally:
             pir_burst_in_progress = False
@@ -2017,21 +2143,23 @@ async def image_sending_loop():
             if trans_in_progress:
                 logger.info(f"[IMG] Trans mode is active, breaking file sending while loop...")
                 break
-            epoch_ms, creator, retry, enc_msgbytes, md5 = db_store.get_next_image_to_send()
+            epoch_ms, creator, retry, enc_msgbytes, md5, file_type = db_store.get_next_image_to_send()
             if epoch_ms is None:
                 logger.debug("[IMG] No valid next image to send (db_store returned empty), breaking inner loop")
                 break
-            logger.info(f"[IMG] Processing image_sending_loop : {creator}_{epoch_ms}.enc (md5={md5})")
+            logger.info(f"[IMG] Processing image_sending_loop : {creator}_{epoch_ms}.enc (md5={md5}, file_type={file_type})")
             try:
                 # Read encrypted bytes directly from file
                 logger.debug(f"[IMG] Reading encrypted image of creator: {creator}, file: {creator}_{epoch_ms}.enc")
 
                 transmission_start = get_ms_diff()
                 sent_succ = await send_file_main(
-                    "F", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst
+                    "F", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst, file_type
                 )
                 if not sent_succ:
-                    store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
+                    store_succ, err = db_store.store_image(
+                        epoch_ms, creator, retry + 1, enc_msgbytes, False, file_type=file_type
+                    )
                     if not store_succ:
                         logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after send failure, error={err}")
                     else:
@@ -2043,13 +2171,37 @@ async def image_sending_loop():
                 transmission_time = transmission_end - transmission_start
                 db_store.update_img_sent_count(1)
                 logger.info(f"[IMG] ✔✔✔ Image transmission completed in {transmission_time} ms ({transmission_time/1000:.4f} seconds), file: {creator}_{epoch_ms} to {next_dst}")
+                
+                if creator == my_addr:
+                    if running_as_cc():
+                        if file_type == "B":
+                            try:
+                                if ENCRYPTION_ENABLED and uses_hybrid_encryption("F"):
+                                    imgbytes = enc.decrypt_hybrid(enc_msgbytes, encnode.get_prv_key(creator))
+                                else:
+                                    imgbytes = enc_msgbytes
+                                raw_jpeg_bytes = imgbytes[IMAGE_META_HEADER_LEN:]
+                                if set_base_image(epoch_ms, raw_jpeg_bytes):
+                                    logger.info(f"[IMG] =======> New base image {creator}_{epoch_ms} saved to flash successfully <=======")
+                                else:
+                                    logger.error(f"[IMG] failed to save base image {creator}_{epoch_ms}")
+                            except Exception as e:
+                                logger.error(f"EXCP_ERR: [IMG] failed to set base image {creator}_{epoch_ms}: {e}\n{logger.exc_str(e)}")
+                        else:
+                            logger.info(f"[IMG] cropped image {creator}_{epoch_ms} uploaded, not saved as base image")
+                    else:
+                        store_succ, err = db_store.store_image(
+                            epoch_ms, creator, retry, enc_msgbytes, file_type=file_type, is_sent=True
+                        )
 
                 if db_store.get_img_queued_count() > 0:
                     await asyncio.sleep(IMAGE_SENDING_NEXT_INTERVAL)
 
             except Exception as e:
                 logger.error(f"EXCP_ERR: [IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued\n{logger.exc_str(e)}")
-                store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
+                store_succ, err = db_store.store_image(
+                    epoch_ms, creator, retry + 1, enc_msgbytes, False, file_type=file_type
+                )
                 if not store_succ:
                     logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after exception, error={err}")
                 else:
@@ -2121,10 +2273,13 @@ def process_message(databytes, rssi=None, snr=None):
         asyncio.create_task(device_busy_life(sender))
     elif msg_typ == "S": # TODO need to ignore duplicate images, and send some response in A itself
         try:
-            filedata_id, msg_typ, numchunks, md5 = decode_s_message(msgbytes)
+            filedata_id, msg_typ, numchunks, md5, file_type = decode_s_message(msgbytes)
             if filedata_id is None or numchunks is None:
                 logger.error(f"[CHUNK] Invalid S packet, cannot get filedata_id/numchunks")
                 return False
+            logger.info(
+                f"[IMG RX] Received S packet for filedata_id={filedata_id}, expected_chunks={numchunks}, file_type={file_type}"
+            )
             if is_install_mode:
                 logger.warning(f"[CHUNK] TRANS MODE not allowed in install mode, ignoring 'S'...")
                 return False
@@ -2134,7 +2289,7 @@ def process_message(databytes, rssi=None, snr=None):
                 logger.debug(f"[CHUNK] Duplicate S packet for same transfer, sending ACK")
                 asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
             elif db_store.storage_available(creator):
-                if get_transmode_lock(sender, filedata_id, msg_typ, numchunks, md5):
+                if get_transmode_lock(sender, filedata_id, msg_typ, numchunks, md5, file_type):
                     asyncio.create_task(keep_transmode_lock(sender, filedata_id))
                     asyncio.create_task(send_msg("A", my_addr, ackmessage, sender))
                 else:
@@ -2161,7 +2316,7 @@ def process_message(databytes, rssi=None, snr=None):
         except Exception as e:
             logger.error(f"EXCP_ERR: [IMG RX] Error processing chunk I: {e}\n{logger.exc_str(e)}")
     elif msg_typ == "E": #
-        global trans_msg_typ, trans_chunk_md5
+        global trans_msg_typ, trans_chunk_md5, trans_file_type
         global stats_failed_count
         # Process end chunk and respond with missing chunks list or completion confirmation
         free_before = get_free_memory()
@@ -2195,11 +2350,11 @@ def process_message(databytes, rssi=None, snr=None):
                     logger.error(f"EXCP_ERR: [IMG RX] Error cleaning up chunk map for filedata_id {filedata_id}: {e}\n{logger.exc_str(e)}")
 
                 try:
-                    async def _chunk_end_send_or_enqueue(trans_msg_typ_curr, trans_md5_curr):
+                    async def _chunk_end_send_or_enqueue(trans_msg_typ_curr, trans_md5_curr, trans_file_type_curr):
                         nonlocal recompiled_msgbytes
                         next_dst = next_device_in_spath() if running_as_unit() else None
                         ok = await send_file_main_or_enqueue(
-                            "F", creator, recompiled_msgbytes, epoch_ms, trans_md5_curr, ENCRYPTION_ENABLED, next_dst
+                            "F", creator, recompiled_msgbytes, epoch_ms, trans_md5_curr, ENCRYPTION_ENABLED, next_dst, trans_file_type_curr
                         )
                         if not ok:
                             logger.error(
@@ -2223,6 +2378,7 @@ def process_message(databytes, rssi=None, snr=None):
                     ackmessage += b":"
                     trans_msg_typ_copy = trans_msg_typ
                     trans_chunk_md5_copy = trans_chunk_md5
+                    trans_file_type_copy = trans_file_type
                     async def send_ack_multiple(): # send ACK 2 times
                         msg_count = 2
                         for i in range(msg_count):
@@ -2232,7 +2388,7 @@ def process_message(databytes, rssi=None, snr=None):
                     asyncio.create_task(send_ack_multiple())
                     delete_transmode_lock(sender, filedata_id, True)
 
-                    asyncio.create_task(_chunk_end_send_or_enqueue(trans_msg_typ_copy, trans_chunk_md5_copy))
+                    asyncio.create_task(_chunk_end_send_or_enqueue(trans_msg_typ_copy, trans_chunk_md5_copy, trans_file_type_copy))
                 except Exception as e:
                     logger.error(f"EXCP_ERR: [IMG RX] Error scheduling chunk end (send/enqueue): {e}\n{logger.exc_str(e)}")
                     try:
@@ -2289,6 +2445,12 @@ def process_message(databytes, rssi=None, snr=None):
         logger.debug(f"[ACK] Received ACK message: {msg_uid}, payload: {msgbytes}")
     elif msg_typ == "D":
         logger.info(f"[DBG] Received DEBUG message, msg={msgbytes}, ignoring...")
+    elif msg_typ == "U":
+        if not msgbytes or len(msgbytes) != 6:
+            logger.error(f"[U] bad payload len={len(msgbytes) if msgbytes else 0}")
+            return False
+        epoch_ms = int.from_bytes(msgbytes, "big")
+        asyncio.create_task(proccess_u_message(creator, epoch_ms))
     elif msg_typ == "R":
         global is_install_mode, restmode_in_progress
         if not is_install_mode:

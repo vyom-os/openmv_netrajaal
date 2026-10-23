@@ -137,15 +137,28 @@ class DbStore(StoreUtils):
     # [7]         : 1 byte  -> creator_id (0-255)
     # [8]         : 1 byte  -> retry count (0-10)
     # [9:12]      : 3 bytes -> image size (big-endian)
+    # [12]        : 1 byte  -> file_type ord('B') base / ord('C') cropped
+    # [13]        : 1 byte  -> is_sent (0 = not sent, 1 = sent)
     IMG_FILLED_FLAG_OFFSET = 0
     IMG_LIST_EPOCH_OFFSET = 1
     IMG_LIST_EPOCH_BYTES = 6
+    
     IMG_LIST_CREATOR_OFFSET = 7
     IMG_LIST_CREATOR_BYTES = 1
+    
     IMG_LIST_RETRY_OFFSET = 8
     IMG_LIST_RETRY_BYTES = 1
+    
     IMG_LIST_SIZE_OFFSET = 9
-    IMG_LIST_HEADER_SIZE = 12
+    IMG_LIST_SIZE_BYTES = 3
+
+    IMG_LIST_FILE_TYPE_OFFSET = 12  # one char: 'B' or 'C'
+    IMG_LIST_FILE_TYPE_BYTES = 1
+
+    IMG_LIST_ISSENT_OFFSET = 13
+    IMG_LIST_ISSENT_BYTES = 1
+    
+    IMG_LIST_HEADER_SIZE = 14
     IMG_LIST_DATA_CAPACITY = IMG_LIST_SLOT_SIZE - IMG_LIST_HEADER_SIZE
 
     def __init__(self, process_id_str, my_addr) -> None:
@@ -325,13 +338,15 @@ class DbStore(StoreUtils):
 
             creator_img_count = 0
             my_img_count = 0
-            total_filled = 0
+            total_img_queued = 0
 
             for idx in range(self.IMG_LIST_CAPACITY):
                 slot = self.image_list_buffer[idx]
                 if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                     continue
-                total_filled += 1
+                if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                    continue
+                total_img_queued += 1
                 c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
                 if c_id == creator:
                     creator_img_count += 1
@@ -340,7 +355,7 @@ class DbStore(StoreUtils):
 
             # Reserve free slots for self.my_addr up to LIMIT_PER_DEVICE.
             reserved_for_me = max(0, self.LIMIT_PER_DEVICE - my_img_count)
-            max_usable_for_others = self.IMG_LIST_CAPACITY - total_filled - reserved_for_me
+            max_usable_for_others = self.IMG_LIST_CAPACITY - total_img_queued - reserved_for_me
             if creator_img_count >= self.LIMIT_PER_DEVICE:
                 logger.info(
                     f"[DB] creator={creator} has {creator_img_count} images, "
@@ -383,6 +398,8 @@ class DbStore(StoreUtils):
         retry: int,
         img_bytes: bytes,
         save_file: bool = True,
+        file_type="B",
+        is_sent=False,
     ):
         """
         Store raw image bytes into the image list buffer.
@@ -390,7 +407,18 @@ class DbStore(StoreUtils):
           - 1 byte  : occupied flag (0 = empty, 1 = used)
           - 6 bytes : epoch_ms (48-bit big-endian)
           - 1 byte  : creator_id (0-255)
+          - 1 byte  : retry
           - 3 bytes : image size (big-endian)
+          - 1 byte  : file_type ('B' base / 'C' cropped)
+          - 1 byte  : is_sent
+
+        file_type:
+            "B" -> full/base image (default)
+            "C" -> cropped / VD delta (base_image_id lives in the encrypted header)
+        is_sent:
+            False -> counted and eligible for get_next_image_to_send
+            True  -> not counted; readable only via fetch_image.
+                     Dropped when this device needs a slot past its limit.
 
         Return:
             (store_succ: bool, error: str)
@@ -427,22 +455,25 @@ class DbStore(StoreUtils):
         slot_idx = None
         creator_img_count = 0
         my_img_count = 0
-        total_filled = 0
+        total_img_queued = 0
 
         for idx in range(self.IMG_LIST_CAPACITY):
             slot = self.image_list_buffer[idx]
             if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                 continue
-            total_filled += 1
+            if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                continue
+            total_img_queued += 1
             c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
             if c_id == creator_id:
                 creator_img_count += 1
             if c_id == self.my_addr:
                 my_img_count += 1
 
+        replaced_unsent = False
         if (
             creator_img_count < self.LIMIT_PER_DEVICE
-            and self.image_queued_count < self.IMG_LIST_CAPACITY
+            and total_img_queued < self.IMG_LIST_CAPACITY
         ):
             # Find first empty slot (flag == 0)
             for idx in range(self.IMG_LIST_CAPACITY):
@@ -450,6 +481,16 @@ class DbStore(StoreUtils):
                 if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                     slot_idx = idx
                     break
+            if slot_idx is None and creator_id == self.my_addr:
+                for idx in range(self.IMG_LIST_CAPACITY):
+                    slot = self.image_list_buffer[idx]
+                    if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
+                        continue
+                    if slot[self.IMG_LIST_CREATOR_OFFSET] != self.my_addr:
+                        continue
+                    if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                        slot_idx = idx
+                        break
             if slot_idx is None:
                 logger.error(
                     "[DB] Error in the code, couldn't find empty space saving image"
@@ -462,37 +503,47 @@ class DbStore(StoreUtils):
                     "rejecting new image"
                 )
                 return False, "buffer_full_non_creator"
-            else:  # find the index to replace the old image
-                oldest_epoch = None
-                oldest_idx = None
+            else:
+                # Past this device's limit: drop an is_sent image first.
                 for idx in range(self.IMG_LIST_CAPACITY):
                     slot = self.image_list_buffer[idx]
                     if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                         continue
-
-                    c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
-                    if c_id != self.my_addr:
+                    if slot[self.IMG_LIST_CREATOR_OFFSET] != self.my_addr:
                         continue
-
-                    epoch_bytes = slot[
-                        self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET
-                        + self.IMG_LIST_EPOCH_BYTES
-                    ]
-                    epoch_val = int.from_bytes(epoch_bytes, "big")
-
-                    if oldest_epoch is None or epoch_val < oldest_epoch:
-                        oldest_epoch = epoch_val
-                        oldest_idx = idx
-
-                if oldest_idx is None:
-                    logger.warning(
-                        "[DB] Buffer full but no existing image for this creator; rejecting new image"
-                    )
-                    return False, "buffer_full_no_replace_candidate"
-
-                slot_idx = oldest_idx
-                self.update_img_queued_count(-1)
-                self.update_img_dropped_count(1)
+                    if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                        slot_idx = idx
+                        break
+                if slot_idx is None:
+                    oldest_epoch = None
+                    oldest_idx = None
+                    for idx in range(self.IMG_LIST_CAPACITY):
+                        slot = self.image_list_buffer[idx]
+                        if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
+                            continue
+                        if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                            continue
+                        c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
+                        if c_id != self.my_addr:
+                            continue
+                        epoch_bytes = slot[
+                            self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET
+                            + self.IMG_LIST_EPOCH_BYTES
+                        ]
+                        epoch_val = int.from_bytes(epoch_bytes, "big")
+                        if oldest_epoch is None or epoch_val < oldest_epoch:
+                            oldest_epoch = epoch_val
+                            oldest_idx = idx
+                    if oldest_idx is None:
+                        logger.warning(
+                            "[DB] Buffer full but no existing image for this creator; rejecting new image"
+                        )
+                        return False, "buffer_full_no_replace_candidate"
+                    slot_idx = oldest_idx
+                    replaced_unsent = True
+                if replaced_unsent:
+                    self.update_img_queued_count(-1)
+                    self.update_img_dropped_count(1)
 
         # ------------------------------------------------------------------
         # Write header + data into chosen slot
@@ -516,16 +567,24 @@ class DbStore(StoreUtils):
         slot[self.IMG_LIST_RETRY_OFFSET] = retry_clamped & 0xFF
 
         # Size (3 bytes, big-endian)
-        size_bytes = size.to_bytes(3, "big")
+        size_bytes = size.to_bytes(self.IMG_LIST_SIZE_BYTES, "big")
         start = self.IMG_LIST_SIZE_OFFSET
-        slot[start : start + 3] = size_bytes
+        slot[start : start + self.IMG_LIST_SIZE_BYTES] = size_bytes
+
+        # file_type: one ASCII char 'B' or 'C'
+        if file_type not in ("B", "C"):
+            file_type = "B"
+        slot[self.IMG_LIST_FILE_TYPE_OFFSET] = ord(file_type)
+
+        slot[self.IMG_LIST_ISSENT_OFFSET] = 1 if is_sent else 0
 
         # Image data
         data_start = self.IMG_LIST_HEADER_SIZE
         slot[data_start : data_start + size] = img_bytes[:size]
 
-        # Housekeeping counters
-        self.image_queued_count = min(self.image_queued_count + 1, self.IMG_LIST_CAPACITY)
+        # is_sent=True stays in the buffer for later fetch, and is not a pending send.
+        if not is_sent:
+            self.image_queued_count = min(self.image_queued_count + 1, self.IMG_LIST_CAPACITY)
         logger.info(f"Image added for db_queue, new length: {self.image_queued_count}, {self.process_id_str}_{creator_id}_{epoch_ms}.enc")
 
         # Optionally persist the encrypted image to filesystem (fire-and-forget).
@@ -549,14 +608,15 @@ class DbStore(StoreUtils):
         Select the next image to send in round-robin fashion across creators.
 
         Returns:
-            tuple (img_bytes, epoch_ms, creator_id) or None if no image is available.
+            (epoch_ms, creator_id, retry, img_bytes, md5, file_type)
+            file_type is "B" or "C". Only slots with is_sent=False are considered.
 
         Side effects:
             - Removes the chosen image from the buffer (marks slot as empty).
             - Updates internal round-robin state.
         """
         if self.image_list_buffer is None or self.image_queued_count == 0:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         # Collect distinct creators from occupied slots
         creators = []
@@ -564,12 +624,14 @@ class DbStore(StoreUtils):
             slot = self.image_list_buffer[idx]
             if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                 continue
+            if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                continue
             c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
             if c_id not in creators:
                 creators.append(c_id)
 
         if not creators:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         creators.sort()
 
@@ -592,6 +654,8 @@ class DbStore(StoreUtils):
             slot = self.image_list_buffer[idx]
             if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                 continue
+            if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                continue
 
             c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
             if c_id != chosen_creator:
@@ -613,6 +677,8 @@ class DbStore(StoreUtils):
                 slot = self.image_list_buffer[idx]
                 if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
                     continue
+                if slot[self.IMG_LIST_ISSENT_OFFSET]:
+                    continue
                 epoch_bytes = slot[
                     self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET
                     + self.IMG_LIST_EPOCH_BYTES
@@ -623,7 +689,7 @@ class DbStore(StoreUtils):
                     chosen_epoch = epoch_val
 
         if chosen_slot_idx is None:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         slot = self.image_list_buffer[chosen_slot_idx]
 
@@ -637,15 +703,23 @@ class DbStore(StoreUtils):
         creator_id = slot[self.IMG_LIST_CREATOR_OFFSET]
         retry = slot[self.IMG_LIST_RETRY_OFFSET]
 
-        size_bytes = slot[self.IMG_LIST_SIZE_OFFSET : self.IMG_LIST_SIZE_OFFSET + 3]
+        size_bytes = slot[
+            self.IMG_LIST_SIZE_OFFSET : self.IMG_LIST_SIZE_OFFSET + self.IMG_LIST_SIZE_BYTES
+        ]
         size = int.from_bytes(size_bytes, "big")
+
+        ft_b = slot[self.IMG_LIST_FILE_TYPE_OFFSET]
+        if ft_b in (ord("B"), ord("C")):
+            file_type = chr(ft_b)
+        else:
+            file_type = "B"
 
         if size <= 0 or size > self.IMG_LIST_DATA_CAPACITY:
             # Corrupt entry; clear it and skip
             logger.warning(f"[DB] Corrupt image slot at {chosen_slot_idx}, clearing")
             slot[self.IMG_FILLED_FLAG_OFFSET] = 0
             self.image_queued_count = max(0, self.image_queued_count - 1)
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         data_start = self.IMG_LIST_HEADER_SIZE
         img_bytes = bytes(slot[data_start : data_start + size])
@@ -657,7 +731,43 @@ class DbStore(StoreUtils):
         # Update round-robin state
         self._last_sent_img_creator = creator_id
         img_md5 = ubinascii.hexlify(hashlib.md5(img_bytes).digest()).decode()
-        return epoch_ms, creator_id, retry, img_bytes, img_md5
+        return epoch_ms, creator_id, retry, img_bytes, img_md5, file_type
+
+    def fetch_image(self, epoch_ms, creator_id, delete=True):
+        """Return (epoch_ms, enc_msgbytes) for (epoch_ms, creator_id), or (None, None). Clears the slot when delete=True."""
+        if self.image_list_buffer is None:
+            return None, None
+        creator_id = creator_id & 0xFF
+        for idx in range(self.IMG_LIST_CAPACITY):
+            slot = self.image_list_buffer[idx]
+            if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
+                continue
+            if slot[self.IMG_LIST_CREATOR_OFFSET] != creator_id:
+                continue
+            epoch_bytes = slot[
+                self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET + self.IMG_LIST_EPOCH_BYTES
+            ]
+            if int.from_bytes(epoch_bytes, "big") != epoch_ms:
+                continue
+            size = int.from_bytes(
+                slot[self.IMG_LIST_SIZE_OFFSET : self.IMG_LIST_SIZE_OFFSET + self.IMG_LIST_SIZE_BYTES],
+                "big",
+            )
+            was_queued = slot[self.IMG_LIST_ISSENT_OFFSET] == 0
+            if size <= 0 or size > self.IMG_LIST_DATA_CAPACITY:
+                logger.warning(f"[DB] Corrupt image slot at {idx} for {creator_id}_{epoch_ms}, clearing")
+                slot[self.IMG_FILLED_FLAG_OFFSET] = 0
+                if was_queued:
+                    self.image_queued_count = max(0, self.image_queued_count - 1)
+                return None, None
+            data_start = self.IMG_LIST_HEADER_SIZE
+            enc_msgbytes = bytes(slot[data_start : data_start + size])
+            if delete:
+                slot[self.IMG_FILLED_FLAG_OFFSET] = 0
+                self.image_queued_count = max(0, self.image_queued_count - 1)
+                logger.info(f"[DB] Deleted image {self.process_id_str}_{creator_id}_{epoch_ms}.enc from slot {idx}")
+            return epoch_ms, enc_msgbytes
+        return None, None
 
     # Listing Getters and Setters for images
 

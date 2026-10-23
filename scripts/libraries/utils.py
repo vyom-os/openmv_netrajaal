@@ -5,9 +5,11 @@ import machine
 import random
 
 # Binary header prepended to JPEG bytes before base64 upload (API strips first N bytes).
-# 2-byte LE payload length + 20-byte payload (lat, lon, epoch, image_id, type).
+# Fixed 100-byte reserved header. First 28 bytes are the current layout;
+# bytes 28-99 stay zero so later fields can be added without changing the length.
+IMAGE_META_HEADER_LEN = 100
 IMAGE_META_LEN_FIELD_BYTES = 2
-IMAGE_BASIC_PAYLOAD_LEN = 20
+IMAGE_BASIC_PAYLOAD_LEN = 27  # used bytes after the uint16 length field (through quality)
 
 
 def clamp_to_bytes(value, nbytes):
@@ -44,22 +46,23 @@ def _lat_lon_to_micro_deg_int(coord):
     return micro
 
 
-def pack_image_meta_header(lat, lon, epoch_ms, image_id, file_type):
+def pack_image_meta_header(lat, lon, epoch_ms, image_id, file_type, quality, base_image_id=None):
     """
-    Fixed IMAGE_META_HEADER_LEN-byte prefix (no padding).
+    Fixed IMAGE_META_HEADER_LEN-byte prefix. JPEG body starts after byte 100.
 
-    Little-endian layout:
-      0:2    payload_len uint16 — bytes following this field (IMAGE_META_PAYLOAD_LEN)
+    Little-endian layout (bytes 29-99 reserved, left zero):
+      0:2    payload_len uint16 — used bytes following this field (IMAGE_BASIC_PAYLOAD_LEN)
       2:6    lat  int32  (degrees * 1e6, 6 decimal places)
       6:10   lon  int32  (degrees * 1e6, 6 decimal places)
       10:18  epoch_ms uint64 as two uint32 (lo, hi)
       18:21  image_id 3 ASCII bytes (padded/truncated)
       21:22  frame type: ord('B') background, ord('C') cropped/stitched, ord('F') full frame (AI)
+      22:28  base_image_id 6-byte LE epoch_ms (uint48); 0 if none / full frame
+      28:29  quality uint8 (JPEG 1-100 used to capture / recombine)
     """
-    img_meta_header_len = IMAGE_META_LEN_FIELD_BYTES + IMAGE_BASIC_PAYLOAD_LEN
-    buf = bytearray(img_meta_header_len)
+    buf = bytearray(IMAGE_META_HEADER_LEN)
 
-    # bytes 0-1: payload length (data after this uint16)
+    # bytes 0-1: used payload length (data after this uint16, not the reserved tail)
     struct.pack_into("<H", buf, 0, IMAGE_BASIC_PAYLOAD_LEN)
 
     # bytes 2-5: lat int32 LE (degrees * 1e6, 6 decimal places)
@@ -80,9 +83,24 @@ def pack_image_meta_header(lat, lon, epoch_ms, image_id, file_type):
     buf[18:21] = sid.encode()[:3]
 
     # byte 21: frame type — B background full, C cropped/stitched, F full frame (AI)
-    if file_type not in ("B", "C", "F"):
+    if file_type not in ("B", "C", "F"): # TODO remove F later
         file_type = "B"
     buf[21] = ord(file_type)
+
+    # bytes 22-27: base_image_id uint48 LE (0 = no base / this is a full frame)
+    bid = 0 if base_image_id is None else int(base_image_id)
+    if bid < 0:
+        bid = 0
+    bid = clamp_to_bytes(bid, 6)
+    struct.pack_into("<IH", buf, 22, bid & 0xFFFFFFFF, (bid >> 32) & 0xFFFF)
+
+    # byte 28: JPEG quality 1-100 (the value combine should recompress at)
+    q = 0 if quality is None else int(quality)
+    if q < 1:
+        q = 1
+    elif q > 100:
+        q = 100
+    buf[28] = q
 
     return bytes(buf)
 

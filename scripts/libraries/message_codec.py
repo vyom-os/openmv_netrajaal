@@ -191,13 +191,15 @@ def decode_x_message(msgbytes):
         return None, None
 
 
-def encode_s_message(filedata_id, msg_typ, numchunks, md5):
-    """S start payload: filedata_id:msg_typ:numchunks:md5. Returns None on bad input."""
+def encode_s_message(filedata_id, msg_typ, numchunks, md5, file_type="B"):
+    """S start payload: filedata_id:msg_typ:numchunks:md5:file_type. Returns None on bad input."""
     try:
         if filedata_id is None or msg_typ is None:
             raise ValueError("filedata_id and msg_typ are required")
+        if file_type not in ("B", "C"):
+            file_type = "B"
         md5 = "" if md5 is None else md5
-        text = "{}:{}:{}:{}".format(filedata_id, msg_typ, numchunks, md5)
+        text = "{}:{}:{}:{}:{}".format(filedata_id, msg_typ, int(numchunks), md5, file_type)
         return text.encode()
     except Exception as e:
         logger.error("Failed to encode S message: {}".format(e))
@@ -205,19 +207,22 @@ def encode_s_message(filedata_id, msg_typ, numchunks, md5):
 
 
 def decode_s_message(msgbytes):
-    """Return (filedata_id, msg_typ, numchunks, md5). defaults to C."""
+    """Return (filedata_id, msg_typ, numchunks, md5, file_type). file_type defaults to B (base)."""
     try:
         msg_data = msgbytes.decode()
         parts = msg_data.split(":")
-        if len(parts) != 4:
+        if len(parts) < 4:
             logger.error(f"[CHUNK] start message unparsable {msg_data}")
-            return None, None, None, None
+            return None, None, None, None, None
         filedata_id = parts[0]
         msg_typ = parts[1]
         numchunks = int(parts[2])
         md5 = parts[3]
         logger.info(f"[IMG RX] Received S packet for filedata_id={filedata_id}, expected_chunks={numchunks}")
-        return filedata_id, msg_typ, numchunks, md5
+        file_type = parts[4] if len(parts) >= 5 and parts[4] else "B"
+        if file_type not in ("B", "C"):
+            file_type = "B"
+        return filedata_id, msg_typ, numchunks, md5, file_type
     except Exception as e:
         logger.error("Failed to decode S message: {}".format(e))
-        return None, None, None, None
+        return None, None, None, None, None
