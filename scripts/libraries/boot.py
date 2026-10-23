@@ -56,7 +56,7 @@ APP_DEBUGGING = False
 
 FLAKINESS = 0
 ALERT_TEXT_PAUSED = True
-USE_PIR_SENSOR = False
+USE_PIR_SENSOR = True
 sensor_initialized = False
 # -----------------------------------▲▲▲▲▲-----------------------------------
 
@@ -2091,10 +2091,10 @@ async def person_detection_loop():
                     except Exception as e:
                         logger.warning(f"EXCP_ERR: warning cleaning up image: {e}, can be ignored...\n{logger.exc_str(e)}")
                     led.off()
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 80)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
         except Exception as e:
             logger.error(f"EXCP_ERR: [PIR] unexpected error in event taking and saving: {e}\n{logger.exc_str(e)}")
-            await asyncio.sleep(35 if USE_PIR_SENSOR else 80)
+            await asyncio.sleep(35 if USE_PIR_SENSOR else 240)
 
         finally:
             pir_burst_in_progress = False
