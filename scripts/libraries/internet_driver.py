@@ -18,6 +18,8 @@ from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 import json
 
+EVENT_URL = "https://api.vyomiq.io/watchmen-detect/"
+
 try:
     import logger
     HAS_LOGGER = True
@@ -284,7 +286,7 @@ class InternetDriver(InternetUtils):
             # state variables
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False  # is sim present and ready for use
-            self.configured = False  # module heath is not good, internet might be issue
+            self.gsm_configured = False  # module heath is not good, internet might be issue
             self.has_internet = False  # is internet connection established
             self.is_cc_enabled = True  # if false device will act as unit node
             
@@ -297,7 +299,7 @@ class InternetDriver(InternetUtils):
             logger.error(f"Error in InternetDriver init: {e}")
             self.module_ready = False
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
             self.has_internet = False
             self.is_cc_enabled = True
 
@@ -534,7 +536,7 @@ class InternetDriver(InternetUtils):
             logger.error("[CELL] ✘✘✘ Failed to reset hardware")
         self.module_ready = False
         self.has_sim = False
-        self.configured = False
+        self.gsm_configured = False
         self.has_internet = False
         return ok
 
@@ -564,20 +566,20 @@ class InternetDriver(InternetUtils):
         if not await self._check_at_command_response():
             self.module_ready = False  # module is ready for use or not
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: Failed to get AT response"
         logger.info("[CELL] [Step 1/4] ✔✔✔ AT command response received")
 
         logger.info("[CELL] Checking SIM health...")
         if not await self._check_sim():
             self.has_sim = False
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: SIM not ready"
         logger.info("[CELL] [Step 2/4] ✔✔✔ SIM is ready")
 
         logger.info("[CELL] Activating PDP context...")
         if not await self._activate_pdp_data_context(1):
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: Failed to activate PDP context"
         logger.info("[CELL] [Step 3/4] ✔✔✔ PDP context activated")
         
@@ -588,13 +590,13 @@ class InternetDriver(InternetUtils):
 
         logger.info("[CELL] Configuring HTTP context...")
         if not await self._configure_http_context():
-            self.configured = False
+            self.gsm_configured = False
             return False, "Module configuration error: Failed to configure HTTP context"
         logger.info("[CELL] [Step 4/4] ✔✔✔ HTTP context configured")
 
         self.module_ready = True
         self.has_sim = True
-        self.configured = True
+        self.gsm_configured = True
         logger.info("✔✔✔ EC200 module configured successfully")
         return True, None
 
@@ -813,7 +815,7 @@ class InternetDriver(InternetUtils):
             return False, "MODULE NOT READY"
         if not self.has_sim:
             return False, "SIM NOT READY"
-        if not self.configured:
+        if not self.gsm_configured:
             return False, "MODULE NOT CONFIGURED"
         if not self.has_internet:
             return False, "INTERNET NOT ESTABLISHED"
@@ -1132,7 +1134,7 @@ class InternetDriver(InternetUtils):
                 return None
             jpeg_bytearray = img.compress(quality=25)
             imgbytes = bytes(jpeg_bytearray)
-            if uses_hybrid_encryption("P"):
+            if uses_hybrid_encryption("F"):
                 encnode = enc.EncNode(self.machine_id)
                 enc_msgbytes = enc.encrypt_hybrid(imgbytes, encnode.get_pub_key())
                 img_b64_str = ubinascii.b2a_base64(enc_msgbytes).rstrip().decode()
@@ -1192,6 +1194,7 @@ class InternetDriver(InternetUtils):
                 "Authorization": "Bearer YOUR_TOKEN",
             }
             test_count = 5
+            succ_mark = 1
             ok = 0
             common_img_payload = self.get_image_payload()
             if not common_img_payload:
@@ -1209,7 +1212,7 @@ class InternetDriver(InternetUtils):
                     logger.info(
                         f"[{i}/{test_count}] SUCCESS | HTTP: {http_code} | {duration_ms/1000:.4f} seconds"
                     )
-                    if ok >= 2:
+                    if ok >= succ_mark:
                         logger.info("[CELL] ✔✔✔ Upload test passed, returning True...")
                         return True
                 else:
@@ -1219,7 +1222,7 @@ class InternetDriver(InternetUtils):
                     logger.error(
                         f"[{i}/{test_count}] FAILED | HTTP: {http_code} | {duration_ms/1000:.4f} seconds | {err}"
                     )
-            return ok >= 2
+            return ok >= succ_mark
         except Exception as e:
             logger.error(f"Error in make_upload_test: {e}")
             return False
@@ -1229,31 +1232,11 @@ class InternetDriver(InternetUtils):
 # ------------------------------------------------------------------
 
 # Global Variables
-LOG_DIR = "/sdcard/logs"
-MAIN_LOG = LOG_DIR + "/internet_driver.log"
-is_writable = False
-
-# Create log directory
-def init_dir():
-    global is_writable
-    try:
-        os.mkdir(LOG_DIR)
-        is_writable = True
-    except OSError:
-        is_writable = False
-        logger.warning("Error: SD card not writable, logs wouldn't be saved.")
-        pass
-        
-def write_log(message):
-    if is_writable:
-        with open(MAIN_LOG, "a") as f:
-            f.write(message + "\n")
 
 if __name__ == "__main__":
     try:
-        write_log("STARTING MAIN")
+        logger.info("STARTING INTERNET DRIVER MAIN")
         led_restart_blinker()
-        init_dir()
     except Exception as e:
         logger.error(f"Error in logging setup: {e}")
         
@@ -1273,13 +1256,11 @@ if __name__ == "__main__":
         except Exception as e:
             # Keep this handler simple; only treat UARTNotAvailableError specially.
             logger.fatal(f"Internet driver init failed: {e}, Rebooting...")
-            write_log(f"Internet driver init failed: {e}, Rebooting...")
             time.sleep(10)
             machine.reset()
 
-        if not internet_module.configured:
+        if not internet_module.gsm_configured:
             logger.fatal("Internet configuration failed! Rebooting...")
-            write_log("Internet configuration failed!, Rebooting...")
             time.sleep(10)
             machine.reset()
 
@@ -1293,14 +1274,15 @@ if __name__ == "__main__":
         }
 
         total_uploads = 100
+        mix_data = True
         curr_epoch_ms = utime.time_ns() // 1_000_000
         success_count = 0
         fail_count = 0
         total_duration_ms = 0
 
         for i in range(total_uploads):
-            payload = payload_2 if (i % 2 == 0) else payload_1
-            filename = f"{curr_epoch_ms}.json" if (i % 2 == 0) else f"{curr_epoch_ms}.jpg"
+            payload = payload_2 if (i % 2 == 0) and mix_data else payload_1
+            filename =  f"{curr_epoch_ms}.json" if (i % 2 == 0)  and mix_data else f"{curr_epoch_ms}.jpg"
             curr_epoch_ms += 1
             payload["epoch_ms"] = curr_epoch_ms
             start_ms = time.ticks_ms()
@@ -1320,7 +1302,6 @@ if __name__ == "__main__":
                     f"{sec:.4f} seconds | {filename}\n"
                 )
                 logger.info(msg_ok)
-                write_log(msg_ok.rstrip())
             else:
                 fail_count += 1
                 msg_fail = (
@@ -1328,7 +1309,6 @@ if __name__ == "__main__":
                     f"{sec:.4f} seconds | {filename} | {response}\n"
                 )
                 logger.error(msg_fail)
-                write_log(msg_fail.rstrip())
 
         avg_duration_ms = (
             (total_duration_ms // total_uploads) if total_uploads > 0 else 0
@@ -1338,15 +1318,9 @@ if __name__ == "__main__":
         logger.info(f"Failed: {fail_count}")
         logger.info(f"Average duration: {avg_duration_ms} ms")
         logger.info("END, Rebooting the device...")
-        write_log(f"Total: {total_uploads}")
-        write_log(f"Success: {success_count}")
-        write_log(f"Failed: {fail_count}")
-        write_log(f"Average duration: {avg_duration_ms} ms")
-        write_log("END, Rebooting the device...")
         time.sleep(2)
         machine.reset()
     except Exception as e:
         logger.fatal(f"Unexpected error: {e}, Rebooting...")
-        write_log(f"Unexpected error: {e}, Rebooting...")
         time.sleep(10)
         machine.reset()
