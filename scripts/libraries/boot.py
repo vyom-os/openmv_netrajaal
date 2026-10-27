@@ -94,7 +94,7 @@ led.off()
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
 # SIZE VARS
-CHUNK_DATA_SIZE = 60
+CHUNK_DATA_SIZE = 200
 PACKET_PAYLOAD_LIMIT = CHUNK_DATA_SIZE + 15
 PACKET_BODY_LIMIT = CHUNK_DATA_SIZE + 5
 RSA_ENCRYPTION_LIMIT = 117
@@ -123,7 +123,6 @@ RADIO_SNR_BYTES = 1
 # TIME VARS
 MIN_SLEEP = 0.1    # max 0.1, 0.02 (works with highest data rate)
 ACK_SLEEP = 1       # max 2, 1 (works with highest data rate)
-CHUNK_SLEEP = 0.1  # max 0.1, 0.04 (works with highest data rate)
 
 HB_WAIT = 180
 D_MSG_WAIT = 60
@@ -148,8 +147,9 @@ NET_PATH_EXPIRY_MS = 1800000 # 1800 second, 30 minutes
 
 TRANSMODE_LOCK_TIMEOUT = 600 # TODO PRODUCTION
 TRANSMODE_INACTIVITY_LIMIT = 40 # 20 second
-CHUNK_BURST_SIZE = 50
-CHUNK_BURST_RX_SLEEP = 0.4
+I_BULK_COUNT = 50 # I frames handed to radio_send in one enqueue
+CHUNK_BURST_RX_SLEEP = 0.4 # pause between I bulks so the receiver can catch up
+CHUNK_BULK_TX_SLEEP = 0.1 # pause between last I bulk and end of transfer
 
 gps_module = None
 internet_module = None
@@ -982,18 +982,34 @@ async def periodic_health_stats_loop():
 
 # MSG TYPE = H(eartbeat), A(ck), B(egin), E(nd), C(hunk), S(hortest path)
 
-async def radio_send(dest, data, msg_uid, urgent=False):
-    # Input: dest: int, data: bytes; Output: (success, err). Sends via RadioOwner.
+async def radio_send(data: "bytes | bytearray | memoryview | list", urgent=False):
+    # list items are bytes, bytearray, or memoryview. Output: (success, err).
     global lora_continuous_sent_error_count
-    if len(data) > 254:
-        return False, f"[LORA] msg too large : {len(data)}"
+    frames = data if isinstance(data, list) else (data,)
+    for frame in frames:
+        if len(frame) > 254:
+            return False, f"[LORA] msg too large: {len(frame)}"
     if radio_owner is None or not radio_owner.ready():
         return False, "[LORA] radio not ready"
 
     result = await radio_owner.enqueue(data, urgent=urgent).wait()
-    if not result or not result[0]:
+    failed = 0
+    if isinstance(data, list):
+        ok, err = bool(result), None
+        for frame_ok, frame_err in result or ():
+            if not frame_ok:
+                failed += 1
+                if ok:
+                    ok, err = False, frame_err
+        if not ok and not failed:
+            failed = len(frames)
+    else:
+        ok = bool(result) and result[0]
         err = None if not result else result[1]
-        lora_continuous_sent_error_count += 1
+        if not ok:
+            failed = 1
+    if not ok:
+        lora_continuous_sent_error_count += failed
         if lora_continuous_sent_error_count >= LORA_CONTINUOUS_SENT_ERROR_LIMIT:
             asyncio.create_task(recover_lora(
                 f"PHY send failed {lora_continuous_sent_error_count} times in a row, err: {err}"
@@ -1017,7 +1033,7 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
 
         urgent = msg_typ in ("A", "W")
         if not ackneeded:
-            succ, err = await radio_send(dest, payload_bytes, msg_uid, urgent=urgent)
+            succ, err = await radio_send(payload_bytes, urgent=urgent)
             if not succ:
                 radio_sent_fail_count += 1
                 logger.error(f"[LORA] Error sending message: {err}, MSG_UID = {msg_uid}")
@@ -1028,7 +1044,7 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
             return (True, None, None, None, None, [])
 
         for retry_i in range(retry_count):
-            succ, err = await radio_send(dest, payload_bytes, msg_uid, urgent=urgent)
+            succ, err = await radio_send(payload_bytes, urgent=urgent)
             if not succ:
                 logger.error(f"[LORA] Error sending message {1+retry_i}/{retry_count}: {err}, MSG_UID = {msg_uid}")
                 continue
@@ -1112,6 +1128,51 @@ async def send_msg(msg_typ, creator, msgbytes, dest, retry_count=3): # all messa
         logger.error(f"EXCP_ERR: [LORA] Exception in send_msg: {e}\n{logger.exc_str(e)}")
         return False, None, None, None, None
 
+async def _flush_i_batch(batch, dest):
+    """Send one bulk of I frames through radio_send. False when the radio rejects the bulk."""
+    ok, err = await radio_send(batch)
+    if not ok:
+        logger.error(f"I bulk of {len(batch)} failed: {err}")
+        return False
+    logger.info(f"⮕ Sent {len(batch)} chunks to {dest}!")
+    return True
+
+async def _send_image_chunks(creator, dest, filedata_id, chunks, chunk_ids, missing=False):
+    """Send the listed chunk indexes, I_BULK_COUNT frames per radio_send, then pause."""
+    total = len(chunk_ids)
+    batch = []
+    for idx, chunk_id in enumerate(chunk_ids):
+        if idx % I_BULK_COUNT == 0:
+            logger.info(f"⋙ Sending {'missing ' if missing else ''}chunks to {dest}, ({idx}-{min(idx + I_BULK_COUNT, total)})/{total}...")
+        if chunk_id < 0 or chunk_id >= len(chunks):
+            logger.warning(f"[CHUNK] skip invalid chunk {chunk_id}")
+        else:
+            chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
+            if len(chunkbytes) > PACKET_BODY_LIMIT:
+                logger.error(f"[LORA] I chunk {chunk_id} body {len(chunkbytes)} exceeds {PACKET_BODY_LIMIT}")
+            else:
+                msg_uid, crc_checksum = get_msg_header("I", creator, dest, chunkbytes)
+                frame = msg_uid + crc_checksum + b";" + chunkbytes
+                if len(frame) > 254:
+                    logger.error(f"[LORA] I chunk {chunk_id} frame {len(frame)} exceeds 254")
+                else:
+                    batch.append(frame)
+        if len(batch) > 0 and (len(batch) >= I_BULK_COUNT or idx == total - 1):
+            if not check_transmode_lock(dest, filedata_id):
+                logger.error("[CHUNK] image aborted, transfer lock lost")
+                return False
+            if is_restmode_inprogress():
+                logger.error("[CHUNK] REST MODE in progress, skipping chunk send")
+                return False
+            await _flush_i_batch(batch, dest)
+            if len(batch) >= I_BULK_COUNT:
+                await asyncio.sleep(CHUNK_BURST_RX_SLEEP)
+            else:
+                await asyncio.sleep(CHUNK_BULK_TX_SLEEP)
+            batch = []
+            
+    return True
+
 async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
     if not is_lora_ready():
         return False, "LORA not ready"
@@ -1133,38 +1194,15 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
             delete_transmode_lock(dest, filedata_id)
             return False, "Failed sending chunk start"
 
-        for chunk_id in range(len(chunks)):
-            if check_transmode_lock(dest, filedata_id): # check old logs is still in progress or not
-                if chunk_id % 10 == 0:
-                    if is_restmode_inprogress():
-                        return False, "REST MODE in progress, skipping chunk send"
-                    logger.info(f"⋙ Sending chunks to {dest}, ({chunk_id}-{min(chunk_id+10, len(chunks))})/{len(chunks)}...")
-                await asyncio.sleep(CHUNK_SLEEP)
-                # Adding meta data to chunk bytes, 3 + 2 + 45 = 50 bytes max
-                chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
-                if(chunk_id+1) % CHUNK_BURST_SIZE == 0:
-                    logger.info(f"[CHUNK] pause {CHUNK_BURST_RX_SLEEP}s after {chunk_id+1} chunks for RX")
-                    await asyncio.sleep(CHUNK_BURST_RX_SLEEP)
-            else:
-                # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
-                return False, "TRANS MODE ended, timeout error"
+        await _send_image_chunks(creator, dest, filedata_id, chunks, range(len(chunks)))
         max_miss_retries = 30
         for retry_i in range(max_miss_retries):
-            if retry_i == 0:
-                await asyncio.sleep(0.1)  # Faster first check
-            else:
-                await asyncio.sleep(CHUNK_SLEEP)
             succ, _, _, _, _, missing_chunks = await send_single_packet("E", creator, f"{filedata_id}:{epoch_ms}", dest, retry_count = 5)
             if not succ:
                 # logger.error(f"[CHUNK] Failed sending chunk end")
                 return False, "Failed sending chunk end"
             else:
-                if (
-                    missing_chunks is None
-                    or len(missing_chunks) == 0
-                    or (len(missing_chunks) == 1 and missing_chunks[0] == -1)
-                ):
+                if len(missing_chunks) == 0:
                     logger.info(f"[CHUNK] Successfully sent all chunks (missing_chunks={missing_chunks})")
                     delete_transmode_lock(dest, filedata_id)
                     if retry_i==0:
@@ -1177,16 +1215,11 @@ async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file 
                 logger.info(
                     f"[CHUNK] Receiver still missing {len(missing_chunks)} chunks after retry {retry_i}: {missing_chunks}"
                 )
-                if check_transmode_lock(dest, filedata_id): # check old logs is still in progress or not
-                    for idx, chunk_id in enumerate(missing_chunks):
-                        if idx % 10 == 0:
-                            logger.info(f"⋙ Sending missing chunks to {dest}, ({idx}-{min(idx+10, len(missing_chunks))})/{len(missing_chunks)}...")
-                        await asyncio.sleep(CHUNK_SLEEP)
-                        chunkbytes = filedata_id.encode() + chunk_id.to_bytes(CHUNK_ID_BYTES) + chunks[chunk_id]
-                        _, _, _, _, _, _ = await send_single_packet("I", creator, chunkbytes, dest)
-                else:
-                    # logger.error(f"TRANS MODE ended, marking data send as failed, timeout error")
+                if not check_transmode_lock(dest, filedata_id):
                     return False, "TRANS MODE ended, timeout error"
+                if is_restmode_inprogress():
+                    return False, "REST MODE in progress, skipping image transfer"
+                await _send_image_chunks(creator, dest, filedata_id, chunks, missing_chunks)
 
         delete_transmode_lock(dest, filedata_id)
         return False, f"Failed sending data, max retries reached-{max_miss_retries}"
@@ -2100,8 +2133,8 @@ def process_message(databytes, rssi=None, snr=None):
     if is_install_mode and msg_typ not in ["X", "Y", "Z", "A", "H", "K"]:
         logger.info(f"[{recv_log} from {sender}{rf_log}] [{'*' * data_masked_log}] {len(databytes)} bytes, msg_typ= {msg_typ}, MSG_UID = {msg_uid}, skipping msg in install mode...")
         return
-    elif msg_typ != "I":
-        logger.info(f"[{recv_log} from {sender}{rf_log}] [{'*' * data_masked_log}] {len(databytes)} bytes, MSG_UID = {msg_uid}")
+    elif msg_typ != "I" and msg_typ != "D":
+        logger.info(f"[{recv_log} from {sender}{rf_log}] [{'*' * data_masked_log}] {len(databytes)} bytes, MSG_UID = {msg_uid}: rssi/snr: {_fmt_rssi_snr(rssi, snr)}")
 
     # logger.info(f"[PARSED HEADER] msg_uid:{msg_uid}, msg_typ:{msg_typ}, creator:{creator}, sender:{sender}, receiver:{receiver}, len-msgbytes:{len(msgbytes)}")
     radio_rssi = rssi_encode(rssi)
@@ -2288,7 +2321,7 @@ def process_message(databytes, rssi=None, snr=None):
         ack_msgs_recd.append((msg_uid, msgbytes, get_ms_diff(), radio_rssi, radio_snr)) # radio_rssi_2 = local RSSI of this ACK
         logger.debug(f"[ACK] Received ACK message: {msg_uid}, payload: {msgbytes}")
     elif msg_typ == "D":
-        logger.info(f"[DBG] Received DEBUG message, msg={msgbytes}, ignoring...")
+        logger.debug(f"[DBG] Received DEBUG message, msg={msgbytes}, ignoring...")
     elif msg_typ == "R":
         global is_install_mode, restmode_in_progress
         if not is_install_mode:
@@ -2497,7 +2530,11 @@ async def send_debugmsg():
 
 
 async def keep_generating_debugmsg():
+    global trans_in_progress
     while True:
+        if trans_in_progress:
+            await asyncio.sleep(200)
+            continue
         await asyncio.create_task(send_debugmsg())
         await asyncio.sleep(D_MSG_WAIT + random.randint(3,10))
 
@@ -2755,6 +2792,7 @@ async def keep_updating_gps():
 # All Handlers
 # ---------------------------------------------------------------------------
 app_controller = None
+
 class AppHandler:
     def __init__(self):
         pass

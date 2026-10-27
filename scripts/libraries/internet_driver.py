@@ -612,8 +612,9 @@ class InternetDriver(InternetUtils):
             return True
     
     async def establish_internet(self, retry_count=3):
-        logger.info("[CELL] Establishing internet connection... with sleep for 15 seconds")
-        await asyncio.sleep(15) # sleep for 10 seconds to let module settle
+        init_sleep = 15
+        logger.info(f"[CELL] Establishing internet connection... with sleep for {init_sleep} seconds")
+        await asyncio.sleep(init_sleep) # sleep for 10 seconds to let module settle
         
         init_ok = False
         init_error = None

@@ -728,8 +728,8 @@ class RadioOwner:
         if new_strong >= 10 and new_rx == 0:
             problems.append(f"{new_strong} strong CRC errors, no valid RX")
 
-        self.logger.info(f"[RADIO] health mode={mode} rssi={rssi} "
-                      f"max_irq_latency={self._max_latency_ms}ms "
+        self.logger.debug(f"[RADIO] health mode={mode} rssi={rssi} "
+                      f"max_irq_latency={self._max_latency_ms} ms, "
                       f"max_callbacks={self._max_active_cb} {self.get_stats()}")
         self._max_latency_ms = 0
         self._max_active_cb = self._active_cb
