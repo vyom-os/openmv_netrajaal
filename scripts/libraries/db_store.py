@@ -128,7 +128,9 @@ class DbStore(StoreUtils):
 
     # Image list buffer defaults (aligned with nv2/main.py, extended header)
     IMG_LIST_CAPACITY = 20  # Number of image slots
-    IMG_MAX_SIZE = 100  # 100KB per image
+    # HD q70 + hybrid encryption reached 157344 bytes in the field.
+    # 200KB slot leaves 204788 bytes of payload room after the 12-byte header.
+    IMG_MAX_SIZE = 200  # KB per image
     IMG_LIST_SLOT_SIZE = IMG_MAX_SIZE * 1024
 
     # Header layout inside each image slot:
@@ -150,10 +152,7 @@ class DbStore(StoreUtils):
 
     def __init__(self, process_id_str, my_addr) -> None:
         """
-        Complete all 5 tasks described in the comments:
-        1. Optional image directory on SD card
-        2. In-transit recompile buffer
-        3. Image ring buffer
+        Start in memory-only mode and allocate the image ring buffer.
         """
         # Initialise base StoreUtils (including FS counters)
         super().__init__()
@@ -164,25 +163,12 @@ class DbStore(StoreUtils):
         self.process_id_str: str = process_id_str
         self.my_addr = my_addr
 
-        self.fs_root = "/sdcard"
-        self.sdcard_available = (
-            self._is_sdcard_readable() and self._is_sdcard_writable()
-        )
-
+        # Memory-only: images stay in the RAM ring. No SD probe at startup.
+        self.fs_root = None
+        self.sdcard_available = False
         self.process_dir = None
         self.image_dir = None
         self.logs_dir = None
-
-        if self.sdcard_available:
-            logger.info(f"[DB] ⛃⛃⛃⛁⛁⛁ SD CARD AVAILABLE & USABLE, using fs_root={self.fs_root}")
-            self.process_dir = f"{self.fs_root}/{self.process_id_str}"
-            self.image_dir = f"{self.process_dir}/all_images"
-            self.logs_dir = f"{self.process_dir}/logs"
-            self._create_dir_if_not_exists(self.process_dir)
-            self._create_dir_if_not_exists(self.image_dir)
-            self._create_dir_if_not_exists(self.logs_dir)
-        else:
-            logger.warning("[DB] ⛃⛃⛃⛁⛁⛁ SD CARD NOT AVAILABLE/USABLE, operating in memory-only mode")
 
         # ---- TASK 2: in-transit recompile buffer ----
         # self.image_recompile_buffer = None
@@ -201,68 +187,6 @@ class DbStore(StoreUtils):
 
         self.LIMIT_PER_DEVICE = 6
         self.img_retry_count_to_fail = 20 # TODO need to increased
-
-    # ------------------------------------------------------------------
-    # Internal helpers (filesystem)
-    # ------------------------------------------------------------------
-    def _is_sdcard_readable(self) -> bool:
-        """Best-effort check that SD card root is listable."""
-        for attempt in range(2):
-            try:
-                utime.sleep_ms(300 * (attempt + 1))
-                os.listdir(self.fs_root)
-                logger.debug(f"[DB] SD card readable (attempt {attempt + 1})")
-                return True
-            except OSError:
-                logger.warning(f"[DB] SD card not ready (attempt {attempt + 1}/5)")
-        return False
-
-    def _is_sdcard_writable(self) -> bool:
-        """Best-effort check that we can create a tiny file."""
-        test_file = f"{self.fs_root}/.dbstore_test"
-        try:
-            with open(test_file, "wb") as f:
-                f.write(b"ok")
-            os.remove(test_file)
-
-            test_file = "/sdcard/processid"
-            with open(test_file, "wb") as f:
-                self.process_id_str.encode()
-            return True
-        except OSError:
-            logger.warning("[DB] SD card not writable")
-            return False
-
-    def _create_dir_if_not_exists(self, dir_path: str) -> None:
-        """Minimal variant of `create_dir_if_not_exists` in nv2/main.py."""
-        try:
-            parts = [p for p in dir_path.split("/") if p]
-            if len(parts) < 2:
-                logger.warning(f"[DB] Invalid directory path (no parent): {dir_path}")
-                return
-            parent = "/" + "/".join(parts[:-1])
-            dir_name = parts[-1]
-
-            if dir_name not in os.listdir(parent):
-                os.mkdir(dir_path)
-                logger.info(f"[DB] Created {dir_path}")
-            else:
-                try:
-                    os.listdir(dir_path)
-                except OSError:
-                    logger.warning(
-                        f"[DB] {dir_path} exists but is not a directory; recreating"
-                    )
-                    try:
-                        os.remove(dir_path)
-                        os.mkdir(dir_path)
-                        logger.info(f"[DB] Recreated directory {dir_path}")
-                    except OSError as e:
-                        logger.error(
-                            f"[DB] Failed to recreate directory {dir_path}: {e}"
-                        )
-        except Exception as e:
-            logger.error(f"[DB] Error ensuring directory {dir_path}: {e}")
 
     # ------------------------------------------------------------------
     # Internal helpers (buffers)
@@ -775,12 +699,14 @@ def _rm_tree(path):
 
 
 def _wipe_vyomos_contents():
-    """Delete everything under /vyomos. Volume mount stays; used on new firmware only."""
+    """Delete log contents under /vyomos. Keeps machinestate; mount stays."""
     try:
         names = os.listdir(LOG_ROOT)
     except OSError:
         return
     for name in names:
+        if name.startswith("machinestate"):
+            continue
         _rm_tree(LOG_ROOT + "/" + name)
     _sync_fs()
 
@@ -860,68 +786,6 @@ def _list_zip_names():
             out.append(name)
     out.sort()
     return out
-
-
-def _store_zip_payload(path):
-    """Return (arcname, payload_offset, payload_size) for a store-method zip.
-
-    Payload is the uncompressed .txt sitting after the local file header.
-    Returns None if the file is not a readable store-method zip.
-    """
-    try:
-        with open(path, "rb") as f:
-            if f.read(4) != b"PK\x03\x04":
-                return None
-            f.seek(8)
-            method = struct.unpack("<H", f.read(2))[0]
-            if method != 0:
-                return None
-            f.seek(18)
-            comp, uncomp = struct.unpack("<II", f.read(8))
-            name_len, extra_len = struct.unpack("<HH", f.read(4))
-            name = f.read(name_len)
-            if comp != uncomp:
-                return None
-            if extra_len:
-                f.read(extra_len)
-            return (name.decode(), 30 + name_len + extra_len, uncomp)
-    except (OSError, ValueError, UnicodeError):
-        return None
-
-
-def list_vyomos_log_exports():
-    """Log payloads to copy off /vyomos, oldest segment first, then the live file.
-
-    Each dict:
-      file_name: str  — log_NNNNN.txt for a rotated segment, or log.txt
-      path: str       — filesystem path to open
-      offset: int     — byte offset of the text payload (0 for log.txt)
-      size: int       — payload length in bytes
-    """
-    items = []
-    for name in _list_zip_names():
-        path = LOG_ZIP_DIR + "/" + name
-        info = _store_zip_payload(path)
-        if not info:
-            continue
-        arcname, offset, size = info
-        if size <= 0:
-            continue
-        items.append({
-            "file_name": arcname,
-            "path": path,
-            "offset": offset,
-            "size": size,
-        })
-    active_size = _file_size(LOG_PATH)
-    if active_size > 0:
-        items.append({
-            "file_name": "log.txt",
-            "path": LOG_PATH,
-            "offset": 0,
-            "size": active_size,
-        })
-    return items
 
 
 def _expected_zip_size(src_size, arcname):

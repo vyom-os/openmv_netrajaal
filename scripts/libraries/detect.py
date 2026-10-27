@@ -1,7 +1,7 @@
 from machine import Pin
 import time
 import ml
-import sensor
+import csi
 import image
 import logger
     
@@ -108,16 +108,17 @@ class Detector:
 
 def main():
     logger.info(f"In Main of Detect")
-    sensor.reset()
-    sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)
-    sensor.skip_frames(time=2000)
-    sensor.set_auto_gain(False)
-    sensor.set_auto_whitebal(False)
+    cam = csi.CSI(delays=False)
+    cam.reset()
+    cam.pixformat(csi.RGB565)
+    cam.framesize(csi.QVGA)
+    cam.skip_frames(time=2000)
+    cam.auto_gain(False)
+    cam.auto_whitebal(False)
     d = Detector()
     for i in range(100):
         time.sleep_ms(500)
-        img = sensor.snapshot()
+        img = cam.snapshot()
         person_detected = d.check_person(img)
         logger.info(f"Person detected = {person_detected}")
 

@@ -1,4 +1,5 @@
-from utils import int_to_nbytes
+import struct
+from utils import get_rand, int_to_nbytes
 import ubinascii as _b64mod
 import logger
 
@@ -155,3 +156,44 @@ def decode_x_message(msgbytes):
     except Exception as e:
         logger.error("Failed to decode X message: {}".format(e))
         return None, None
+
+def dummy_x_message():
+    return encode_x_message(1, 17177177)
+
+
+def _encode_node_id(node_id):
+    if not isinstance(node_id, int):
+        raise TypeError("node id must be int, got {}".format(type(node_id)))
+    if not 0 <= node_id <= 255:
+        raise ValueError("node id {} out of range (0-255)".format(node_id))
+    return bytes((node_id,))
+
+
+def _encode_dest(dest):
+    if dest in (0, 65535):
+        return b"*"
+    return _encode_node_id(dest)
+
+
+def create_msg_uid(creator, sender, destination, msgbytes, msg_typ="X"):
+    """
+    Build a LoRa packet header: 7-byte msg_uid + 4-byte CRC-32 of msgbytes.
+
+    msg_uid is type (1) + creator (1) + sender (1) + destination (1) + random (3).
+    Destination 0 or 65535 is the broadcast marker "*".
+    CRC-32 covers msgbytes only and is packed big-endian.
+    """
+    if not isinstance(msg_typ, str) or len(msg_typ) != 1:
+        raise ValueError("msg_typ must be 1 character, got {!r}".format(msg_typ))
+    if not isinstance(msgbytes, (bytes, bytearray)):
+        raise TypeError("msgbytes must be bytes, got {}".format(type(msgbytes)))
+
+    msg_uid = (
+        msg_typ.encode()
+        + _encode_node_id(creator)
+        + _encode_node_id(sender)
+        + _encode_dest(destination)
+        + get_rand(len=3).encode()
+    )
+    crc = struct.pack(">I", _b64mod.crc32(msgbytes) & 0xFFFFFFFF)
+    return msg_uid, crc
