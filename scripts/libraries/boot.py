@@ -36,7 +36,7 @@ from detect import PIR_PIN, turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 from watchdog import start_watchdog, check_watchdog_reset
 from supervisor import supervised
-from message_codec import encode_x_message, decode_x_message, encode_s_message, decode_s_message
+from message_codec import encode_x_message, decode_x_message, encode_s_message, decode_s_message, create_msg_uid
 from clock_utils import get_uptime_sec, get_epoch_sec, set_device_epoch_sec, format_epochms_str
 
 # -----------------------------------▼▼▼▼▼-----------------------------------
@@ -199,7 +199,7 @@ RESTMODE_INACTIVITY_LIMIT = 180  # 3 min
 
 # Global pre-allocated buffer for image recompilation (150KB)
 IMAGE_RECOMPILE_BUFFER = None  # Will be initialized at startup
-DATA_BUFFER_SIZE = 150 * 1024 # 150KB
+DATA_BUFFER_SIZE = 180 * 1024 # 180KB
 
 MAX_CHUNK_COUNT = (DATA_BUFFER_SIZE + CHUNK_DATA_SIZE - 1) // CHUNK_DATA_SIZE
 CHUNK_BLOCK_SIZE = 1 + CHUNK_DATA_SIZE  # [len:1][body:45]
@@ -1081,27 +1081,37 @@ async def send_single_packet(msg_typ, creator, msgbytes, dest, retry_count = 3):
         radio_sent_fail_count += 1
         return (False, None, None, None, None, [])
 
-def make_chunks(msgbytes):
-    # Input: msgbytes: bytes; Output: list of bytes chunks up to 200 bytes each (safe size for 255 byte LoRa limit)
-    # Calculation: Max LoRa packet (255) - msg_uid+separator (8) - filedata_id (IMG_ID_BYTES) - chunk_index (3) = 242 bytes available
-    # Using 200 bytes per chunk for safety margin (prevents ERR_PACKET_TOO_LONG errors)
-    # Total packet: 7 (msg_uid) + 1 (;) + IMG_ID_BYTES (filedata_id) + 3 (chunk_index) + 200 (data) = 213 bytes (safe)
-    global CHUNK_DATA_SIZE
-    chunks = []
-    while len(msgbytes) > CHUNK_DATA_SIZE:
-        chunks.append(msgbytes[0:CHUNK_DATA_SIZE])
-        msgbytes = msgbytes[CHUNK_DATA_SIZE:]
-    if len(msgbytes) > 0:
-        chunks.append(msgbytes)
-    return chunks
+class _ChunkView:
+    # Zero-copy view of msgbytes. Do not mutate the buffer while this is in use.
+    def __init__(self, msgbytes):
+        self.mv = memoryview(msgbytes)
+        self.size = CHUNK_DATA_SIZE
+        n = len(self.mv)
+        self.count = (n + self.size - 1) // self.size if n else 0
 
-def encrypt_if_needed(msg_typ, msg):
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, chunk_id):
+        start = chunk_id * self.size
+        end = start + self.size
+        n = len(self.mv)
+        if end > n:
+            end = n
+        return self.mv[start:end]
+
+
+def make_chunks(msgbytes):
+    # CHUNK_DATA_SIZE slices (last may be short). At 200 bytes the packet stays under the 255-byte LoRa limit.
+    return _ChunkView(msgbytes)
+
+def encrypt_if_needed(msg_typ, msg):  # MEMORY_HEAVY
     try:
         # Input: msg_typ: str message type, msg: bytes; Output: bytes (possibly encrypted message)
         if not ENCRYPTION_ENABLED:
             return msg
         if uses_hybrid_encryption(msg_typ):
-            msgbytes = enc.encrypt_hybrid(msg, encnode.get_pub_key())
+            msgbytes = enc.encrypt_hybrid(msg, encnode.get_pub_key())  # MEMORY_HEAVY
             logger.debug(f"{msg_typ} : Len msg = {len(msg)}, len msgbytes = {len(msgbytes)}")
             return msgbytes
         return msg
@@ -1173,7 +1183,7 @@ async def _send_image_chunks(creator, dest, filedata_id, chunks, chunk_ids, miss
             
     return True
 
-async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5): # file sending
+async def send_msg_big(msg_typ, creator, msgbytes, dest, epoch_ms, md5):
     if not is_lora_ready():
         return False, "LORA not ready"
     
@@ -1368,83 +1378,51 @@ def recompile_msg(filedata_id):
         return None
 
     # Use pre-allocated buffer if available, otherwise fall back to dynamic allocation
-    if IMAGE_RECOMPILE_BUFFER is not None:
-        try:
-            # Calculate total size needed
-            total_size = 0
-            chunk_sizes = []
-            for chunk_id in range(trans_chunks_count):
-                chunk_data = get_data_for_chunk_id(chunk_id)
-                if chunk_data is None:
-                    logger.error(f"[CHUNK] recompile_msg: missing chunk {chunk_id} for filedata_id={filedata_id}")
-                    return None
-                chunk_size = len(chunk_data)
-                chunk_sizes.append(chunk_size)
-                total_size += chunk_size
-
-            # Validate size fits in buffer
-            if total_size > len(IMAGE_RECOMPILE_BUFFER):
-                logger.error(f"[CHUNK] Image size {total_size} exceeds buffer size {len(IMAGE_RECOMPILE_BUFFER)}")
+    try:
+        # Calculate total size needed
+        total_size = 0
+        chunk_sizes = []
+        for chunk_id in range(trans_chunks_count):
+            chunk_data = get_data_for_chunk_id(chunk_id)
+            if chunk_data is None:
+                logger.error(f"[CHUNK] recompile_msg: missing chunk {chunk_id} for filedata_id={filedata_id}")
                 return None
+            chunk_size = len(chunk_data)
+            chunk_sizes.append(chunk_size)
+            total_size += chunk_size
 
-            # Work directly with the pre-allocated buffer (NO SLICING - that would copy!)
-            # Copy chunks into the buffer
-            offset = 0
-            for chunk_id in range(trans_chunks_count):
-                chunk_data = get_data_for_chunk_id(chunk_id)
-                chunk_size = chunk_sizes[chunk_id]
-                # Direct assignment into buffer - no copy
-                IMAGE_RECOMPILE_BUFFER[offset:offset + chunk_size] = chunk_data
-                offset += chunk_size
-
-            # return bytes(IMAGE_RECOMPILE_BUFFER[:total_size])
-            # Return memoryview directly - zero-copy, no allocation
-            # memoryview slicing is zero-copy (unlike bytearray slicing which creates a copy)
-            # file.write() in MicroPython accepts memoryview, so no conversion needed
-            # This completely avoids memory allocation for the return value
-            return memoryview(IMAGE_RECOMPILE_BUFFER)[:total_size]
-
-        except MemoryError as e:
-            logger.error(f"EXCP_ERR: [CHUNK] MemoryError in recompile_msg for {filedata_id}: {e}\n{logger.exc_str(e)}")
-            free_mem = get_free_memory()
-            logger.info(f"[MEM] Free memory after MemoryError: {free_mem}KB")
+        # Validate size fits in buffer
+        if total_size > len(IMAGE_RECOMPILE_BUFFER):
+            logger.error(f"[CHUNK] Image size {total_size} exceeds buffer size {len(IMAGE_RECOMPILE_BUFFER)}")
             return None
-        except Exception as e:
-            logger.error(f"EXCP_ERR: [CHUNK] Exception in recompile_msg for {filedata_id}: {e}\n{logger.exc_str(e)}")
-            free_mem = get_free_memory()
-            logger.info(f"[MEM] Free memory after exception: {free_mem}KB")
-            return None
-    else:
-        logger.error(f"[CHUNK] recompile_msg not IMAGE_RECOMPILE_BUFFER initialized")
+
+        # Work directly with the pre-allocated buffer (NO SLICING - that would copy!)
+        # Copy chunks into the buffer
+        offset = 0
+        for chunk_id in range(trans_chunks_count):
+            chunk_data = get_data_for_chunk_id(chunk_id)
+            chunk_size = chunk_sizes[chunk_id]
+            # Direct assignment into buffer - no copy
+            IMAGE_RECOMPILE_BUFFER[offset:offset + chunk_size] = chunk_data
+            offset += chunk_size
+
+        # return bytes(IMAGE_RECOMPILE_BUFFER[:total_size])
+        # Return memoryview directly - zero-copy, no allocation
+        # memoryview slicing is zero-copy (unlike bytearray slicing which creates a copy)
+        # file.write() in MicroPython accepts memoryview, so no conversion needed
+        # This completely avoids memory allocation for the return value
+        return memoryview(IMAGE_RECOMPILE_BUFFER)[:total_size]
+
+    except MemoryError as e:
+        logger.error(f"EXCP_ERR: [CHUNK] MemoryError in recompile_msg for {filedata_id}: {e}\n{logger.exc_str(e)}")
+        free_mem = get_free_memory()
+        logger.info(f"[MEM] Free memory after MemoryError: {free_mem}KB")
         return None
-        # try:
-        #     total_size = 0
-        #     chunk_sizes = []
-        #     for chunk_id in range(trans_chunks_count):
-        #         chunk_data = get_data_for_chunk_id(chunk_id)
-        #         if chunk_data is None:
-        #             logger.error(f"[CHUNK] recompile_msg_fallback: missing chunk {chunk_id} for filedata_id={filedata_id}")
-        #             return None
-        #         chunk_size = len(chunk_data)
-        #         chunk_sizes.append(chunk_size)
-        #         total_size += chunk_size
-
-        #     # Pre-allocate bytearray with exact size needed
-        #     recompiled = bytearray(total_size)
-
-        #     # Second pass: copy chunks into pre-allocated bytearray
-        #     offset = 0
-        #     for chunk_id in range(trans_chunks_count):
-        #         chunk_data = get_data_for_chunk_id(chunk_id)
-        #         recompiled[offset:offset + chunk_sizes[chunk_id]] = chunk_data
-        #         offset += chunk_sizes[chunk_id]
-
-        #     return bytes(recompiled)
-        # except Exception as e:
-        #     logger.error(f"[CHUNK] Exception in recompile_msg_fallback for {filedata_id}: {e}")
-        #     free_before = get_free_memory()
-        #     logger.info(f"[MEM] Free memory after recompile_msg_fallback in fail: {free_before/1024:.1f}KB")
-        #     return None
+    except Exception as e:
+        logger.error(f"EXCP_ERR: [CHUNK] Exception in recompile_msg for {filedata_id}: {e}\n{logger.exc_str(e)}")
+        free_mem = get_free_memory()
+        logger.info(f"[MEM] Free memory after exception: {free_mem}KB")
+        return None
 
 
 # Note only sends as many as wouldnt go beyond frame size
@@ -1632,7 +1610,7 @@ async def upload_payload_to_server(payload, msg_typ, creator): # FINAL
         return False
 
 
-async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
+async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):  # MEMORY_HEAVY
     """
     Send one encrypted file/blob to cloud (command center) or to next hop via chunked LoRa.
     msg_typ: F (file/image).
@@ -1646,7 +1624,7 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
 
     if running_as_cc():
         if isinstance(enc_msgbytes, bytes) or isinstance(enc_msgbytes, bytearray) or isinstance(enc_msgbytes, memoryview):
-            data_b64_str = ubinascii.b2a_base64(enc_msgbytes).rstrip().decode()
+            data_b64_str = ubinascii.b2a_base64(enc_msgbytes).rstrip().decode()  # MEMORY_HEAVY
         else:
             data_b64_str = enc_msgbytes
         server_payload = {
@@ -1793,7 +1771,7 @@ async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
             return False
         return True
     except Exception as e:
-        logger.error(f"EXCP_ERR: [PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}\n{logger.exc_str(e)}")
+        logger.error(f"EXCP_ERR: Failed to save encrypted file: {event_epoch_ms}, error: {e}\n{logger.exc_str(e)}")
         img_capture_count -= 1
         return False
 
@@ -1826,16 +1804,16 @@ def check_compression_for_cc():
         return
     else:
         HIGH_TARGET_SIZE = 99 * 1024 # max 99KB
-        LOW_TARGET_SIZE = 80 * 1024 # settle at min 80KB
+        LOW_TARGET_SIZE = 70 * 1024 # settle at min 70KB
         
         HIGH_COMP_QUALITY = 100
-        MIN_COMP_QUALITY = 55
+        MIN_COMP_QUALITY = 35
         
-        global_comp_quality = 55
+        global_comp_quality = 35
 
     compression_updated_for_cc = True
 
-def capture_image(compress_quality=None):
+def capture_image(compress_quality=None):  # MEMORY_HEAVY
     """Capture one image, store raw copy, compress, and auto-adjust global quality."""
     global img_capture_count, img_file_counter, global_comp_quality
     global db_store
@@ -1860,22 +1838,22 @@ def capture_image(compress_quality=None):
 
         check_compression_for_cc()
         if compress_quality:
-            jpeg_bytearray = bytes(img_snapshot.compress(quality=compress_quality))
+            jpeg_bytearray = bytes(img_snapshot.compress(quality=compress_quality))  # MEMORY_HEAVY
             size = len(jpeg_bytearray)
             logger.info(
                 f"Compressed image size: {size}, compress_quality-{compress_quality}"
             )
         else:
-            jpeg_bytearray = bytes(img_snapshot.compress(quality=global_comp_quality))
+            jpeg_bytearray = bytes(img_snapshot.compress(quality=global_comp_quality))  # MEMORY_HEAVY
             size = len(jpeg_bytearray)
             logger.info(
                 f"Compressed image size: {size}, compress_quality-{global_comp_quality}"
             )  # TODO, move it debug later
 
             if size > HIGH_TARGET_SIZE:
-                global_comp_quality = max(MIN_COMP_QUALITY, global_comp_quality - 5)
+                global_comp_quality = max(MIN_COMP_QUALITY, global_comp_quality - 2)
             if size < LOW_TARGET_SIZE:
-                global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + 5)
+                global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + 2)
 
         return img_snapshot, jpeg_bytearray, event_epoch_ms
     except Exception as e:
@@ -1885,7 +1863,7 @@ def capture_image(compress_quality=None):
         turn_OFF_IR_emitter()
         # Do not camera_sleep here — stay awake for remaining burst frames.
 
-async def person_detection_loop():
+async def person_detection_loop():  # MEMORY_HEAVY
     """
     PIR interrupt-driven: on trigger, capture 5 images in a burst (no sleep between).
     All 5 images share one event. IRQ is debounced until burst finishes.
@@ -1936,7 +1914,7 @@ async def person_detection_loop():
                         led.off()
                         continue
 
-                    db_store.store_image_raw(event_epoch_ms, my_addr, img_snapshot)
+                    # db_store.store_image_raw(event_epoch_ms, my_addr, img_snapshot)
                     if img_snapshot is not None:
                         del img_snapshot
                         img_snapshot = None
@@ -1958,7 +1936,7 @@ async def person_detection_loop():
                         logger.info(f"[PIR] GPS Data LAT={lat}, LON={lon}")
                         imgbytes = pack_image_meta_header(
                             lat, lon, event_epoch_ms, image_id, "F"
-                        ) + imgbytes
+                        ) + imgbytes  # MEMORY_HEAVY
                     except Exception as e:
                         logger.error(f"EXCP_ERR: [PIR] Failed to pack image meta header: {e}\n{logger.exc_str(e)}")
                         img_capture_count -= 1
@@ -1966,7 +1944,7 @@ async def person_detection_loop():
                         continue
 
                     try:
-                        enc_msgbytes = encrypt_if_needed("F", imgbytes)
+                        enc_msgbytes = encrypt_if_needed("F", imgbytes)  # MEMORY_HEAVY
                         try:
                             del imgbytes
                         except NameError as e:
@@ -2954,7 +2932,7 @@ class AppHandler:
 
     async def verify_internet_capture_and_upload(self):
         try:
-            _, img_bytes, _ = capture_image(compress_quality=35)
+            _, img_bytes, _ = capture_image(compress_quality=25)
             return await self.upload_verify_image_to_server(img_bytes)
         finally:
             img_bytes = None
@@ -2991,7 +2969,7 @@ class AppHandler:
     async def send_image_to_app(self):
         img_bytes = None
         try:
-            _, img_bytes, _ = capture_image(compress_quality=35)
+            _, img_bytes, _ = capture_image(compress_quality=25)
             if not img_bytes:
                 logger.error("[verify_image] capture_image returned no data")
                 return False

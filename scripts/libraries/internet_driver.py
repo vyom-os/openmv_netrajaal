@@ -896,7 +896,7 @@ class InternetDriver(InternetUtils):
     # Upload
     # ------------------------------------------------------------------
 
-    async def upload_data(
+    async def upload_data(  # MEMORY_HEAVY
         self, data, url, headers=None, input_timeout=20, response_timeout=20
     ):
         """POST JSON (or string) to `url` over cellular HTTP (Quectel QHTTP*).
@@ -949,7 +949,7 @@ class InternetDriver(InternetUtils):
 
             # --- Convert payload ---
             if isinstance(data, dict):
-                data = json.dumps(data)
+                data = json.dumps(data)  # MEMORY_HEAVY
             data_length = len(data)
 
             # --- Step 1: Set URL ---
@@ -1122,7 +1122,7 @@ class InternetDriver(InternetUtils):
     def get_last_fail_count(self):
         return self._last_fail_count
         
-    def get_image_payload(self):
+    def get_image_payload(self):  # MEMORY_HEAVY
         """Capture a JPEG from the camera, hybrid-encrypt, return API payload dict."""
         was_asleep = power_mgmt.is_asleep()
         power_mgmt.camera_wake()
@@ -1137,10 +1137,10 @@ class InternetDriver(InternetUtils):
             imgbytes = bytes(jpeg_bytearray)
             if uses_hybrid_encryption("F"):
                 encnode = enc.EncNode(self.machine_id)
-                enc_msgbytes = enc.encrypt_hybrid(imgbytes, encnode.get_pub_key())
-                img_b64_str = ubinascii.b2a_base64(enc_msgbytes).rstrip().decode()
+                enc_msgbytes = enc.encrypt_hybrid(imgbytes, encnode.get_pub_key())  # MEMORY_HEAVY
+                img_b64_str = ubinascii.b2a_base64(enc_msgbytes).rstrip().decode()  # MEMORY_HEAVY
             else:
-                img_b64_str = ubinascii.b2a_base64(imgbytes).rstrip().decode()
+                img_b64_str = ubinascii.b2a_base64(imgbytes).rstrip().decode()  # MEMORY_HEAVY
             return {
                 "machine_id": self.machine_id,
                 "msg_typ": "event",

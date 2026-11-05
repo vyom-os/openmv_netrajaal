@@ -164,9 +164,12 @@ def build_dummy_heartbeat_payload(version):
 def rssi_encode(rssi):
     """Clamp RSSI to [-150, 0] dBm and encode as a non-negative int in [0, 150].
 
-    Accepts int. Values below -150 become -150; values above 0 become 0.
+    Accepts int or float. Values below -150 become -150; values above 0 become 0.
     Returns abs(rssi), so -150 encodes to 150 and 0 encodes to 0.
+    None (no reading, including FSK) encodes to 255.
     """
+    if rssi is None:
+        return 255
     rssi = int(rssi)
     if rssi < -150:
         rssi = -150
@@ -179,16 +182,23 @@ def decode_rssi(rssi):
     """Decode an encoded RSSI in [0, 150] back to dBm in [-150, 0].
 
     Accepts int. Returns the negative of the encoded value.
+    255 means no reading and returns None.
     """
-    return -int(rssi)
+    rssi = int(rssi)
+    if rssi == 255:
+        return None
+    return -rssi
 
 
 def encode_snr(snr):
     """Clamp SNR to [-10, 20] dB and encode as an int in [0, 30].
 
-    Accepts int. Values below -10 become -10; values above 20 become 20.
+    Accepts int or float. Values below -10 become -10; values above 20 become 20.
     Returns snr + 10 so the encoded range is [0, 30].
+    None (no reading; FSK has no SNR) encodes to 255.
     """
+    if snr is None:
+        return 255
     snr = int(snr)
     if snr < -10:
         snr = -10
@@ -201,8 +211,12 @@ def decode_snr(snr):
     """Decode an encoded SNR in [0, 30] back to dB in [-10, 20].
 
     Accepts int. Returns the encoded value minus 10.
+    255 means no reading and returns None.
     """
-    return int(snr) - 10
+    snr = int(snr)
+    if snr == 255:
+        return None
+    return snr - 10
 
 
 def get_rand(len=3):

@@ -124,11 +124,11 @@ class DbStore(StoreUtils):
     """
 
     # Recompile buffer (same size as in nv2/main.py)
-    DATA_BUFFER_SIZE = 120 * 1024  # 120KB
+    # DATA_BUFFER_SIZE = 180 * 1024  # 180KB
 
     # Image list buffer defaults (aligned with nv2/main.py, extended header)
-    IMG_LIST_CAPACITY = 20  # Number of image slots
-    IMG_MAX_SIZE = 100  # 100KB per image
+    IMG_LIST_CAPACITY = 9  # Number of image slots
+    IMG_MAX_SIZE = 180  # 180KB per image
     IMG_LIST_SLOT_SIZE = IMG_MAX_SIZE * 1024
 
     # Header layout inside each image slot:
@@ -200,7 +200,7 @@ class DbStore(StoreUtils):
         self.img_failed_count = 0
 
         self.LIMIT_PER_DEVICE = 6
-        self.img_retry_count_to_fail = 20 # TODO need to increased
+        self.img_retry_count_to_fail = 10 # TODO need to increased
 
     # ------------------------------------------------------------------
     # Internal helpers (filesystem)
