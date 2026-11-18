@@ -384,6 +384,7 @@ class DbStore(StoreUtils):
         img_bytes: bytes,
         save_file: bool = True,
     ):
+        
         """
         Store raw image bytes into the image list buffer.
         Header layout per slot:
@@ -395,154 +396,159 @@ class DbStore(StoreUtils):
         Return:
             (store_succ: bool, error: str)
         """
-        if retry >= self.img_retry_count_to_fail:
-            self.update_img_failed_count(1)
-            return False, "retry_limit_reached"
-
-        if self.image_list_buffer is None:
-            logger.error("[DB] image_list_buffer not INITIALIZED")
-            return False, "image_buffer_not_initialized"
-
-        if creator_id < 0 or creator_id > 255:
-            logger.error(f"[DB] creator_id out of range (0-255): {creator_id}")
-            return False, "creator_out_of_range"
-
-        size = len(img_bytes)
-        if size > self.IMG_LIST_DATA_CAPACITY:
-            logger.error(
-                f"[DB] Image size {size} exceeds image data capacity "
-                f"{self.IMG_LIST_DATA_CAPACITY}, returning..."
-            )
-            return False, "image_too_large"
-
-        # ------------------------------------------------------------------
-        # Slot selection strategy
-        # ------------------------------------------------------------------
-        # 1) If there is free space (image_list_count < capacity), find first empty slot.
-        # 2) Else (buffer full):
-        #    - If image is from this device (creator_id == self.my_addr),
-        #      replace the oldest image of this creator (min epoch_ms).
-        #    - If image is from other device, reject (return False).
-
         slot_idx = None
-        creator_img_count = 0
-        my_img_count = 0
-        total_filled = 0
+        try:
+            if retry >= self.img_retry_count_to_fail:
+                self.update_img_failed_count(1)
+                self.update_img_dropped_count(1)
+                return False, "retry_limit_reached, dropping image..."
 
-        for idx in range(self.IMG_LIST_CAPACITY):
-            slot = self.image_list_buffer[idx]
-            if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
-                continue
-            total_filled += 1
-            c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
-            if c_id == creator_id:
-                creator_img_count += 1
-            if c_id == self.my_addr:
-                my_img_count += 1
+            if self.image_list_buffer is None:
+                logger.error("[DB] image_list_buffer not INITIALIZED")
+                self.update_img_dropped_count(1)
+                return False, "image_buffer_not_initialized, dropping image..."
 
-        if (
-            creator_img_count < self.LIMIT_PER_DEVICE
-            and self.image_queued_count < self.IMG_LIST_CAPACITY
-        ):
-            # Find first empty slot (flag == 0)
+            if creator_id < 0 or creator_id > 255:
+                logger.error(f"[DB] creator_id out of range (0-255): {creator_id}")
+                self.update_img_dropped_count(1)
+                return False, "creator_out_of_range, dropping image..."
+
+            size = len(img_bytes)
+            if size > self.IMG_LIST_DATA_CAPACITY:
+                logger.error(
+                    f"[DB] Image size {size} exceeds image data capacity "
+                    f"{self.IMG_LIST_DATA_CAPACITY}, returning..."
+                )
+                self.update_img_dropped_count(1)
+                return False, "image_too_large, dropping image..."
+
+            # ------------------------------------------------------------------
+            # Slot selection strategy
+            # ------------------------------------------------------------------
+            # 1) If there is free space (image_list_count < capacity), find first empty slot.
+            # 2) Else (buffer full):
+            #    - If image is from this device (creator_id == self.my_addr),
+            #      replace the oldest image of this creator (min epoch_ms).
+            #    - If image is from other device, reject (return False).
+
+            creator_img_count = 0
+            my_img_count = 0
+            total_filled = 0
+
             for idx in range(self.IMG_LIST_CAPACITY):
                 slot = self.image_list_buffer[idx]
                 if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
-                    slot_idx = idx
-                    break
-            if slot_idx is None:
-                logger.error(
-                    "[DB] Error in the code, couldn't find empty space saving image"
-                )
-                return False, "empty_slot_not_found:unknown_error"
-        else:
-            if creator_id != self.my_addr:
-                logger.warning(
-                    f"[DB] Buffer full and creator_id {creator_id} != my_addr {self.my_addr}; "
-                    "rejecting new image"
-                )
-                return False, "buffer_full_non_creator"
-            else:  # find the index to replace the old image
-                oldest_epoch = None
-                oldest_idx = None
+                    continue
+                total_filled += 1
+                c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
+                if c_id == creator_id:
+                    creator_img_count += 1
+                if c_id == self.my_addr:
+                    my_img_count += 1
+
+            if (
+                creator_img_count < self.LIMIT_PER_DEVICE
+                and self.image_queued_count < self.IMG_LIST_CAPACITY
+            ):
+                # Find first empty slot (flag == 0)
                 for idx in range(self.IMG_LIST_CAPACITY):
                     slot = self.image_list_buffer[idx]
                     if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
-                        continue
-
-                    c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
-                    if c_id != self.my_addr:
-                        continue
-
-                    epoch_bytes = slot[
-                        self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET
-                        + self.IMG_LIST_EPOCH_BYTES
-                    ]
-                    epoch_val = int.from_bytes(epoch_bytes, "big")
-
-                    if oldest_epoch is None or epoch_val < oldest_epoch:
-                        oldest_epoch = epoch_val
-                        oldest_idx = idx
-
-                if oldest_idx is None:
-                    logger.warning(
-                        "[DB] Buffer full but no existing image for this creator; rejecting new image"
+                        slot_idx = idx
+                        break
+                if slot_idx is None:
+                    logger.error(
+                        "[DB] Error in the code, couldn't find empty space saving image"
                     )
-                    return False, "buffer_full_no_replace_candidate"
+                    self.update_img_dropped_count(1)
+                    return False, "empty_slot_not_found:unknown_error, dropping image..."
+            else:
+                if creator_id != self.my_addr:
+                    logger.warning(
+                        f"[DB] Buffer full and creator_id {creator_id} != my_addr {self.my_addr}; "
+                        "rejecting new image"
+                    )
+                    self.update_img_dropped_count(1)
+                    return False, "buffer_full_non_creator, dropping image..."
+                else:  # find the index to replace the old image
+                    oldest_epoch = None
+                    oldest_idx = None
+                    for idx in range(self.IMG_LIST_CAPACITY):
+                        slot = self.image_list_buffer[idx]
+                        if slot[self.IMG_FILLED_FLAG_OFFSET] == 0:
+                            continue
 
-                slot_idx = oldest_idx
-                self.update_img_queued_count(-1)
-                self.update_img_dropped_count(1)
+                        c_id = slot[self.IMG_LIST_CREATOR_OFFSET]
+                        if c_id != self.my_addr:
+                            continue
 
-        # ------------------------------------------------------------------
-        # Write header + data into chosen slot
-        # ------------------------------------------------------------------
-        slot = self.image_list_buffer[slot_idx]
+                        epoch_bytes = slot[
+                            self.IMG_LIST_EPOCH_OFFSET : self.IMG_LIST_EPOCH_OFFSET
+                            + self.IMG_LIST_EPOCH_BYTES
+                        ]
+                        epoch_val = int.from_bytes(epoch_bytes, "big")
 
-        # Occupied flag
-        slot[self.IMG_FILLED_FLAG_OFFSET] = 1
+                        if oldest_epoch is None or epoch_val < oldest_epoch:
+                            oldest_epoch = epoch_val
+                            oldest_idx = idx
 
-        # Epoch (48-bit, big-endian)
-        epoch_clamped = epoch_ms & ((1 << (8 * self.IMG_LIST_EPOCH_BYTES)) - 1)
-        epoch_bytes = epoch_clamped.to_bytes(self.IMG_LIST_EPOCH_BYTES, "big")
-        start = self.IMG_LIST_EPOCH_OFFSET
-        slot[start : start + self.IMG_LIST_EPOCH_BYTES] = epoch_bytes
+                    if oldest_idx is None:
+                        logger.warning(
+                            "[DB] Buffer full but no existing image for this creator; rejecting new image"
+                        )
+                        self.update_img_dropped_count(1)
+                        return False, "buffer_full_no_image_for_same_device, dropping image..."
 
-        # Creator id (1 byte)
-        slot[self.IMG_LIST_CREATOR_OFFSET] = creator_id & 0xFF
+                    slot_idx = oldest_idx
+                    self.update_img_queued_count(-1)
+                    self.update_img_dropped_count(1)
 
-        # Retry count (1 byte, clamped 0-10)
-        retry_clamped = max(0, min(10, retry))
-        slot[self.IMG_LIST_RETRY_OFFSET] = retry_clamped & 0xFF
+            # ------------------------------------------------------------------
+            # Write header + data into chosen slot.
+            # Flag stays 0 until the header and image bytes are complete, so a
+            # failure leaves the slot empty instead of half-written.
+            # ------------------------------------------------------------------
+            slot = self.image_list_buffer[slot_idx]
+            slot[self.IMG_FILLED_FLAG_OFFSET] = 0
 
-        # Size (3 bytes, big-endian)
-        size_bytes = size.to_bytes(3, "big")
-        start = self.IMG_LIST_SIZE_OFFSET
-        slot[start : start + 3] = size_bytes
+            # Epoch (48-bit, big-endian)
+            epoch_clamped = epoch_ms & ((1 << (8 * self.IMG_LIST_EPOCH_BYTES)) - 1)
+            epoch_bytes = epoch_clamped.to_bytes(self.IMG_LIST_EPOCH_BYTES, "big")
+            start = self.IMG_LIST_EPOCH_OFFSET
+            slot[start : start + self.IMG_LIST_EPOCH_BYTES] = epoch_bytes
 
-        # Image data
-        data_start = self.IMG_LIST_HEADER_SIZE
-        slot[data_start : data_start + size] = img_bytes[:size]
+            # Creator id (1 byte)
+            slot[self.IMG_LIST_CREATOR_OFFSET] = creator_id & 0xFF
 
-        # Housekeeping counters
-        self.image_queued_count = min(self.image_queued_count + 1, self.IMG_LIST_CAPACITY)
-        logger.info(f"Image added for db_queue, new length: {self.image_queued_count}, {self.process_id_str}_{creator_id}_{epoch_ms}.enc")
+            # Retry count (1 byte, clamped 0-10)
+            retry_clamped = max(0, min(10, retry))
+            slot[self.IMG_LIST_RETRY_OFFSET] = retry_clamped & 0xFF
 
-        # Optionally persist the encrypted image to filesystem (fire-and-forget).
-        if self.sdcard_available and save_file:
-            enc_filepath = (
-                f"{self.image_dir}/{self.process_id_str}_{creator_id}_{epoch_ms}.enc"
+            # Size (3 bytes, big-endian)
+            size_bytes = size.to_bytes(3, "big")
+            start = self.IMG_LIST_SIZE_OFFSET
+            slot[start : start + 3] = size_bytes
+
+            # Image data
+            data_start = self.IMG_LIST_HEADER_SIZE
+            slot[data_start : data_start + size] = img_bytes[:size]
+
+            slot[self.IMG_FILLED_FLAG_OFFSET] = 1
+            self.update_img_queued_count(1)
+            logger.info(f"Image added for db_queue, new length: {self.image_queued_count}, {self.process_id_str}_{creator_id}_{epoch_ms}.enc")
+
+            return True, ""
+        except Exception as e:
+            logger.error(
+                f"EXCP_ERR: [DB] store_image failed creator={creator_id} epoch={epoch_ms}: {e}\n{logger.exc_str(e)}"
             )
-            logger.info(f"[DB] Scheduling save of encrypted image to {enc_filepath}")
             try:
-                # Do not block caller; schedule async write in background.
-                asyncio.create_task(self.save_file(img_bytes, enc_filepath))
-            except Exception as e:
+                self.update_img_dropped_count(1)
+            except Exception as drop_err:
                 logger.error(
-                    f"[DB] Failed to schedule encrypted image save to {enc_filepath}: {e}"
+                    f"EXCP_ERR: [DB] store_image drop count failed: {drop_err}\n{logger.exc_str(drop_err)}"
                 )
-
-        return True, ""
+            return False, "store_image_exception, dropping image..."
 
     def get_next_image_to_send(self):
         """
@@ -713,7 +719,8 @@ class DbStore(StoreUtils):
 # except when config.VERSION changes (new firmware deploy) — see recovery.
 #
 # Active file grows to 1MB, then becomes /vyomos/zip/log_NNNNN.zip.
-# When active + zips exceed 3MB, delete the oldest zip.
+# The archive is ZIP method 8 (raw deflate). When active + zips exceed 3MB,
+# delete the oldest zip.
 LOG_ROOT = "/vyomos"
 LOG_PATH = "/vyomos/log.txt"
 LOG_ZIP_DIR = "/vyomos/zip"
@@ -723,8 +730,17 @@ LOG_FW_VERSION_PATH = "/vyomos/.fw_version"
 LOG_SEGMENT_BYTES = 1 * 1024 * 1024
 LOG_BUDGET_BYTES = 3 * 1024 * 1024
 LOG_CHUNK_BYTES = 4096
+# 256-byte window. RAW deflate does not record this, so the reader must match.
+LOG_DEFLATE_WBITS = 8
 # Local header (30) + EOCD (22) + central dir fixed (46) + 2 * name; name <= 32.
 LOG_ZIP_OVERHEAD = 30 + 22 + 46 + 64
+
+try:
+    import deflate as _deflate
+    _CAN_DEFLATE = hasattr(_deflate.DeflateIO, "write")
+except ImportError:
+    _deflate = None
+    _CAN_DEFLATE = False
 
 _log_ready = False
 _log_busy = False
@@ -862,64 +878,26 @@ def _list_zip_names():
     return out
 
 
-def _store_zip_payload(path):
-    """Return (arcname, payload_offset, payload_size) for a store-method zip.
-
-    Payload is the uncompressed .txt sitting after the local file header.
-    Returns None if the file is not a readable store-method zip.
-    """
-    try:
-        with open(path, "rb") as f:
-            if f.read(4) != b"PK\x03\x04":
-                return None
-            f.seek(8)
-            method = struct.unpack("<H", f.read(2))[0]
-            if method != 0:
-                return None
-            f.seek(18)
-            comp, uncomp = struct.unpack("<II", f.read(8))
-            name_len, extra_len = struct.unpack("<HH", f.read(4))
-            name = f.read(name_len)
-            if comp != uncomp:
-                return None
-            if extra_len:
-                f.read(extra_len)
-            return (name.decode(), 30 + name_len + extra_len, uncomp)
-    except (OSError, ValueError, UnicodeError):
-        return None
-
-
 def list_vyomos_log_exports():
-    """Log payloads to copy off /vyomos, oldest segment first, then the live file.
+    """Rotated log zips, oldest first. The live log.txt is not included.
 
     Each dict:
-      file_name: str  — log_NNNNN.txt for a rotated segment, or log.txt
-      path: str       — filesystem path to open
-      offset: int     — byte offset of the text payload (0 for log.txt)
-      size: int       — payload length in bytes
+      file_name: str  — log_NNNNN.zip
+      path: str       — filesystem path of that zip
+      offset: int     — always 0
+      size: int       — zip file length in bytes
     """
     items = []
     for name in _list_zip_names():
         path = LOG_ZIP_DIR + "/" + name
-        info = _store_zip_payload(path)
-        if not info:
-            continue
-        arcname, offset, size = info
+        size = _file_size(path)
         if size <= 0:
             continue
         items.append({
-            "file_name": arcname,
+            "file_name": name,
             "path": path,
-            "offset": offset,
-            "size": size,
-        })
-    active_size = _file_size(LOG_PATH)
-    if active_size > 0:
-        items.append({
-            "file_name": "log.txt",
-            "path": LOG_PATH,
             "offset": 0,
-            "size": active_size,
+            "size": size,
         })
     return items
 
@@ -929,36 +907,60 @@ def _expected_zip_size(src_size, arcname):
     return 30 + name_len + src_size + 46 + name_len + 22
 
 
+def _crc_zip_payload(f, method, src_size):
+    """CRC the uncompressed payload. f is positioned at the first payload byte."""
+    if method == 8:
+        if not _CAN_DEFLATE:
+            return None
+        src = _deflate.DeflateIO(f, _deflate.RAW, LOG_DEFLATE_WBITS)
+    else:
+        src = f
+    try:
+        crc = 0
+        remaining = src_size
+        while remaining > 0:
+            n = remaining if remaining < LOG_CHUNK_BYTES else LOG_CHUNK_BYTES
+            chunk = src.read(n)
+            if not chunk:
+                return None
+            crc = binascii.crc32(chunk, crc)
+            remaining -= len(chunk)
+        return crc & 0xFFFFFFFF
+    finally:
+        if src is not f:
+            src.close()
+
+
 def _verify_store_zip(path, src_size, arcname):
-    """Return True if path looks like a complete store-method ZIP of src_size."""
-    size = _file_size(path)
-    if size != _expected_zip_size(src_size, arcname):
-        return False
+    """Return True if path is a complete store or deflate ZIP of src_size bytes."""
+    file_size = _file_size(path)
+    name_b = arcname.encode() if isinstance(arcname, str) else arcname
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"PK\x03\x04":
                 return False
-            f.seek(14)
+            f.read(4)  # version, flags
+            method = struct.unpack("<H", f.read(2))[0]
+            f.read(4)  # time, date
             crc_hdr, comp, uncomp = struct.unpack("<III", f.read(12))
             name_len, extra_len = struct.unpack("<HH", f.read(4))
-            if comp != src_size or uncomp != src_size:
+            if method not in (0, 8) or extra_len != 0 or name_len != len(name_b):
                 return False
-            f.seek(30 + name_len + extra_len)
-            crc = 0
-            remaining = src_size
-            while remaining > 0:
-                n = remaining if remaining < LOG_CHUNK_BYTES else LOG_CHUNK_BYTES
-                chunk = f.read(n)
-                if len(chunk) != n:
-                    return False
-                crc = binascii.crc32(chunk, crc)
-                remaining -= n
-            if (crc & 0xFFFFFFFF) != (crc_hdr & 0xFFFFFFFF):
+            if uncomp != src_size or comp <= 0:
                 return False
-            f.seek(size - 22)
+            if method == 0 and comp != src_size:
+                return False
+            if f.read(name_len) != name_b:
+                return False
+            if file_size != _expected_zip_size(comp, arcname):
+                return False
+            crc = _crc_zip_payload(f, method, src_size)
+            if crc is None or crc != (crc_hdr & 0xFFFFFFFF):
+                return False
+            f.seek(file_size - 22)
             if f.read(4) != b"PK\x05\x06":
                 return False
-    except (OSError, ValueError):
+    except Exception:
         return False
     return True
 
@@ -1069,36 +1071,65 @@ def _make_room(extra_needed):
             break
 
 
-def _file_crc32(path):
+def _file_crc32(path, limit=None):
+    """CRC up to limit bytes. limit=None reads the whole file."""
     crc = 0
+    remaining = limit
     with open(path, "rb") as f:
-        while True:
-            chunk = f.read(LOG_CHUNK_BYTES)
+        while remaining is None or remaining > 0:
+            n = LOG_CHUNK_BYTES
+            if remaining is not None and remaining < n:
+                n = remaining
+            chunk = f.read(n)
             if not chunk:
                 break
             crc = binascii.crc32(chunk, crc)
+            if remaining is not None:
+                remaining -= len(chunk)
     return crc & 0xFFFFFFFF
 
 
-def _zip_store_file(src_path, dest_path, arcname):
-    """Write a minimal store-method ZIP (no compression) in chunked I/O."""
-    size = _file_size(src_path)
-    crc = _file_crc32(src_path)
-    name_b = arcname.encode() if isinstance(arcname, str) else arcname
+def _write_src_limited(src_path, size, write_fn):
+    """Feed the first size bytes of src_path to write_fn."""
+    remaining = size
+    with open(src_path, "rb") as inp:
+        while remaining > 0:
+            n = LOG_CHUNK_BYTES if remaining > LOG_CHUNK_BYTES else remaining
+            chunk = inp.read(n)
+            if not chunk:
+                break
+            write_fn(chunk)
+            remaining -= len(chunk)
+
+
+def _write_log_zip(src_path, dest_path, name_b, size, crc, method):
+    """Write a one-entry ZIP. method 8 is raw deflate, method 0 is stored."""
     name_len = len(name_b)
-
-    with open(dest_path, "wb") as out:
+    with open(dest_path, "w+b") as out:
         out.write(b"PK\x03\x04")
-        out.write(struct.pack("<HHHHHIIIHH", 20, 0, 0, 0, 0, crc, size, size, name_len, 0))
+        # comp size is patched after the body; uncompressed size and CRC are known.
+        out.write(struct.pack("<HHHHHIIIHH", 20, 0, method, 0, 0, crc, 0, size, name_len, 0))
         out.write(name_b)
-        with open(src_path, "rb") as inp:
-            while True:
-                chunk = inp.read(LOG_CHUNK_BYTES)
-                if not chunk:
-                    break
-                out.write(chunk)
-
-        cd_offset = 30 + name_len + size
+        data_start = out.tell()
+        if method == 8:
+            comp = _deflate.DeflateIO(out, _deflate.RAW, LOG_DEFLATE_WBITS)
+            try:
+                _write_src_limited(src_path, size, comp.write)
+            finally:
+                comp.close()
+            try:
+                out.flush()
+            except Exception:
+                pass
+        else:
+            _write_src_limited(src_path, size, out.write)
+        comp_size = out.tell() - data_start
+        if comp_size <= 0:
+            raise OSError("empty log zip")
+        out.seek(18)
+        out.write(struct.pack("<I", comp_size))
+        out.seek(data_start + comp_size)
+        cd_offset = data_start + comp_size
         out.write(b"PK\x01\x02")
         out.write(
             struct.pack(
@@ -1106,11 +1137,11 @@ def _zip_store_file(src_path, dest_path, arcname):
                 20,
                 20,
                 0,
-                0,
+                method,
                 0,
                 0,
                 crc,
-                size,
+                comp_size,
                 size,
                 name_len,
                 0,
@@ -1125,6 +1156,37 @@ def _zip_store_file(src_path, dest_path, arcname):
         cd_size = 46 + name_len
         out.write(b"PK\x05\x06")
         out.write(struct.pack("<HHHHIIH", 0, 0, 1, 1, cd_size, cd_offset, 0))
+
+
+def _zip_store_file(src_path, dest_path, arcname):
+    """Write a one-entry ZIP. Deflate when the firmware can, else store."""
+    size = _file_size(src_path)
+    crc = _file_crc32(src_path, size)
+    name_b = arcname.encode() if isinstance(arcname, str) else arcname
+    if _CAN_DEFLATE:
+        try:
+            _write_log_zip(src_path, dest_path, name_b, size, crc, 8)
+            return size
+        except Exception:
+            _remove_path(dest_path)
+    _write_log_zip(src_path, dest_path, name_b, size, crc, 0)
+    return size
+
+
+def write_live_log_zip(dest_path):
+    """Zip the current log.txt snapshot. Does not remove or rotate log.txt.
+
+    Returns the zip size in bytes. Returns 0 when log.txt is empty.
+    Raises OSError when the snapshot exists but the zip cannot be written.
+    """
+    if _file_size(LOG_PATH) <= 0:
+        return 0
+    _remove_path(dest_path)
+    size = _zip_store_file(LOG_PATH, dest_path, "log.txt")
+    if not _verify_store_zip(dest_path, size, "log.txt"):
+        _remove_path(dest_path)
+        raise OSError("live log zip verify failed")
+    return _file_size(dest_path)
 
 
 def _emergency_trim_active():

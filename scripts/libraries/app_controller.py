@@ -22,47 +22,7 @@ DATA_BUFFER_SIZE = 4096
 
 _file_transfer_state = None
 _message_buffer = ""
-VYOMOS_LOG_CHUNK_BYTES = 2048
-
-
-def _split_utf8_tail(raw):
-    """Split raw so the prefix is complete UTF-8 and the tail is a partial char."""
-    if not raw:
-        return raw, b""
-    i = len(raw) - 1
-    cont = 0
-    while i >= 0 and cont < 3 and (raw[i] & 0xC0) == 0x80:
-        i -= 1
-        cont += 1
-    if i < 0:
-        return b"", raw
-    lead = raw[i]
-    if lead < 0x80:
-        return raw, b""
-    if lead >= 0xF0:
-        need = 4
-    elif lead >= 0xE0:
-        need = 3
-    elif lead >= 0xC0:
-        need = 2
-    else:
-        return raw, b""
-    if (len(raw) - i) < need:
-        return raw[:i], raw[i:]
-    return raw, b""
-
-
-def _decode_log_bytes(raw):
-    try:
-        return raw.decode("utf-8")
-    except Exception:
-        chars = []
-        for b in raw:
-            if b == 9 or b == 10 or b == 13 or (32 <= b < 127):
-                chars.append(chr(b))
-            else:
-                chars.append("?")
-        return "".join(chars)
+VYOMOS_LOG_CHUNK_BYTES = 1000
 
 
 class AppController:
@@ -172,7 +132,7 @@ class AppController:
             logger.info("[APP] App not running, self.is_running = False")
             return False
         if not self.wifi_nic.isconnected() and self.cont_wifi_fail_count>=3:
-            logger.info(f"[APP] WiFi not connected, wifi not connected for {self.cont_wifi_fail_coun} consecutive times")
+            logger.info(f"[APP] WiFi not connected, wifi not connected for {self.cont_wifi_fail_count} consecutive times")
             return False
         if self.cont_socket_fail_count >= 4:
             logger.info(f"[APP] Continuous socket failures, socket not connected {self.cont_socket_fail_count} consecutive times")
@@ -261,14 +221,38 @@ class AppController:
         elif isinstance(data, str):
             data = data.encode("utf-8")
 
+        view = memoryview(data)
+        sent = 0
+        total = len(view)
+        timeouts = 0
         try:
-            # Set timeout for this operation
+            # On 116, continue from bytes already accepted. Do not resend them.
             self.wifi_socket.settimeout(timeout)
-            self.wifi_socket.sendall(data)
+            while sent < total:
+                try:
+                    n = self.wifi_socket.send(view[sent:])
+                except OSError as e:
+                    if getattr(e, "errno", None) != 116:
+                        raise
+                    timeouts += 1
+                    print(f"Send timed out at {sent}/{total}, retry {timeouts}: {e}")
+                    if timeouts >= 3:
+                        return False, self.wifi_socket
+                    continue
+                if not n:
+                    timeouts += 1
+                    if timeouts >= 3:
+                        return False, self.wifi_socket
+                    continue
+                sent += n
+                timeouts = 0
             return True, self.wifi_socket
         except OSError as e:
             errno_val = getattr(e, "errno", None)
-            if errno_val in (104, 107, 116):
+            if errno_val == 116:
+                print(f"Send timed out, giving up: {e}")
+                return False, self.wifi_socket
+            if errno_val in (104, 107):
                 print(f"Connection error during send: {e}")
                 self._close_socket_safely()
                 return False, None
@@ -830,6 +814,27 @@ class AppController:
         }
         return self.send_data_to_app(msg, timeout)
 
+    def _log_vyomos_dir(self, path):
+        """Log every file under path before a log transfer starts."""
+        try:
+            names = os.listdir(path)
+        except OSError as e:
+            logger.error(f"[VYOMOS_LOG] cannot list {path}: {e}")
+            return
+        names.sort()
+        for name in names:
+            child = path + "/" + name
+            try:
+                st = os.stat(child)
+            except OSError as e:
+                logger.error(f"[VYOMOS_LOG] stat {child} failed: {e}")
+                continue
+            if (st[0] & 0o170000) == 0o040000:
+                logger.info(f"[VYOMOS_LOG] dir {child}")
+                self._log_vyomos_dir(child)
+            else:
+                logger.info(f"[VYOMOS_LOG] file {child} {st[6]} bytes")
+
     async def download_vyomos_logs(self):
         """Copy every /vyomos log segment to the app over the WiFi socket."""
         if self._vyomos_log_transfer:
@@ -842,9 +847,21 @@ class AppController:
 
         self._vyomos_log_transfer = True
         self._last_recv_time = time.time()
+        live_zip = None
         try:
             import db_store
+            logger.info("[VYOMOS_LOG] /vyomos before transfer")
+            self._log_vyomos_dir(db_store.LOG_ROOT)
             files = db_store.list_vyomos_log_exports()
+            live_zip = db_store.LOG_ZIP_DIR + "/log_live.zip.partial"
+            live_size = db_store.write_live_log_zip(live_zip)
+            if live_size > 0:
+                files.append({
+                    "file_name": "log.txt.zip",
+                    "path": live_zip,
+                    "offset": 0,
+                    "size": live_size,
+                })
             file_count = len(files)
             manifest = []
             for i, item in enumerate(files):
@@ -852,6 +869,8 @@ class AppController:
                     "file_index": i,
                     "file_name": item["file_name"],
                     "file_size": item["size"],
+                    "encoding": "base64",
+                    "format": "zip",
                 })
             ok, _ = self._send_typed_message(
                 "log_transfer_start",
@@ -894,6 +913,11 @@ class AppController:
         finally:
             self._vyomos_log_transfer = False
             self._last_recv_time = time.time()
+            if live_zip:
+                try:
+                    os.remove(live_zip)
+                except OSError:
+                    pass
 
     async def _stream_vyomos_log_file(self, file_index, file_count, item):
         file_name = item["file_name"]
@@ -910,6 +934,7 @@ class AppController:
                 "file_name": file_name,
                 "file_size": size,
                 "chunk_size": chunk_bytes,
+                "encoding": "base64",
             },
             1.0,
         )
@@ -918,45 +943,32 @@ class AppController:
 
         chunk_index = 0
         bytes_sent = 0
-        carry = b""
         try:
-            with open(path, "rb") as f:
+            with open(path, "rb") as raw:
                 if offset:
-                    f.seek(offset)
+                    raw.seek(offset)
                 remaining = size
                 while remaining > 0:
-                    want = chunk_bytes - len(carry)
-                    if want > remaining:
-                        want = remaining
-                    if want < 1:
-                        want = 1
-                    piece = f.read(want)
+                    want = chunk_bytes if chunk_bytes < remaining else remaining
+                    piece = raw.read(want)
                     if not piece:
                         break
                     remaining -= len(piece)
-                    buf = carry + piece
-                    if remaining > 0:
-                        complete, carry = _split_utf8_tail(buf)
-                    else:
-                        complete = buf
-                        carry = b""
-                    if not complete:
-                        continue
-                    text = _decode_log_bytes(complete)
+                    payload = ubinascii.b2a_base64(piece).decode("utf-8").strip()
                     ok, _ = self._send_typed_message(
                         "log_file_chunk",
                         {
                             "file_index": file_index,
                             "file_name": file_name,
                             "chunk_index": chunk_index,
-                            "chunk_size": len(complete),
-                            "data": text,
+                            "chunk_size": len(piece),
+                            "data": payload,
                         },
                         5.0,
                     )
                     if not ok:
                         return False
-                    bytes_sent += len(complete)
+                    bytes_sent += len(piece)
                     chunk_index += 1
                     self._last_recv_time = time.time()
                     await asyncio.sleep(0)
@@ -969,6 +981,21 @@ class AppController:
                     "result": "fail",
                     "file_index": file_index,
                     "file_name": file_name,
+                },
+                1.0,
+            )
+            return None
+
+        if bytes_sent != size:
+            self._send_typed_message(
+                "log_transfer_error",
+                {
+                    "message": "short zip read",
+                    "result": "fail",
+                    "file_index": file_index,
+                    "file_name": file_name,
+                    "file_size": size,
+                    "bytes_sent": bytes_sent,
                 },
                 1.0,
             )

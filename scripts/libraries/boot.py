@@ -1638,8 +1638,15 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
         sent_succ = await upload_payload_to_server(server_payload, msg_typ, creator)
         return sent_succ
     else:
-        logger.info(f"{log_tag} Sending file msg_typ={msg_typ}, creator={creator}, size={len(enc_msgbytes)} bytes")
-        logger.info(f"{log_tag} ⋙⋙⋙ sending encrypted file to {next_dst}, file: {file_label}")
+        file_size = len(enc_msgbytes)
+        if file_size > 100 * 1024:
+            logger.error(
+                f"{log_tag} image size {file_size} bytes exceeds 100KB, failing without send, file: {file_label}"
+            )
+            return False
+        logger.info(
+            f"{log_tag} ⋙⋙⋙ sending msg_typ={msg_typ} to {next_dst}, creator={creator}, size={file_size} bytes, file: {file_label}"
+        )
         try:
             if next_dst:
                 if is_device_busy(next_dst):
@@ -1658,9 +1665,10 @@ async def send_file_main(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encrypti
     return sent_succ
 
 
-async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst):
+async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md5, encryption_enabled, next_dst, retried=0):
     """
-    Try send_file_main (cloud or mesh) first. If that fails, persist via db_store->store_image so the existing send loops can retry later.
+    Try sending (cloud or mesh) first. If that fails, persist via db_store->store_image so the existing send loops can retry later.
+    retried is how many attempts are already recorded (0 for a new image). A failed send is stored as retried + 1.
     Returns Boolean, True if sent successful or Queued, False otherwise.
     """
     global db_store
@@ -1678,7 +1686,7 @@ async def send_file_main_or_enqueue(msg_typ, creator, enc_msgbytes, epoch_ms, md
         return True
     else:
         logger.error(f"[FILE] send failed, enqueuing to db_store")
-        store_succ, err = db_store.store_image(epoch_ms, creator, 0, enc_msgbytes)
+        store_succ, err = db_store.store_image(epoch_ms, creator, retried + 1, enc_msgbytes)
         if not store_succ:
             logger.error(f"[FILE] store_image enqueue failed, creator={creator} epoch={epoch_ms}, error={err}")
         return store_succ
@@ -1757,66 +1765,79 @@ def pir_interrupt_handler(pin):
         pir_trigger_event.set()
         # logger.info(f"[PIR] Motion detected (interrupt)")
 
-async def _send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst):
-    """Run send/enqueue off the capture path; apply img counters when it finishes.
-    Returns True when the file was sent or queued, False otherwise.
-    """
-    global img_capture_count
-    try:
-        fs_succ = await send_file_main_or_enqueue(
-            "F", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst
-        )
-        if not fs_succ:
-            img_capture_count -= 1
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"EXCP_ERR: Failed to save encrypted file: {event_epoch_ms}, error: {e}\n{logger.exc_str(e)}")
-        img_capture_count -= 1
-        return False
-
 # PIR interrupt → capture → frame buffer → save → encrypt → queue
-# HIGH_TARGET_SIZE = 25 * 1024  # 25 KB, 556 chunks
-# LOW_TARGET_SIZE = 18 * 1024  # 18 KB, 388 chunks
-HIGH_TARGET_SIZE = 45 * 1024
-LOW_TARGET_SIZE = 35 * 1024
-HIGH_COMP_QUALITY = 80
-MIN_COMP_QUALITY = 15
-global_comp_quality = 20
+UNIT_START_CONFIG = {
+    "HIGH_TARGET_SIZE": 100 * 1024,
+    "LOW_TARGET_SIZE": 35 * 1024,
+    "HIGH_COMP_QUALITY": 80,
+    "MIN_COMP_QUALITY": 15,
+    "global_comp_quality": 20,
+}
 
-compression_updated_for_cc = False
+CC_START_CONFIG = {
+    "HIGH_TARGET_SIZE": 140 * 1024,
+    "LOW_TARGET_SIZE": 100 * 1024,
+    "HIGH_COMP_QUALITY": 95,
+    "MIN_COMP_QUALITY": 40,
+    "global_comp_quality": 40,
+}
 
-def check_compression_for_cc():
+HIGH_TARGET_SIZE = None
+LOW_TARGET_SIZE = None
+HIGH_COMP_QUALITY = None
+MIN_COMP_QUALITY = None
+global_comp_quality = None
+
+curr_config_set = None  # None, "unit", "cc"
+
+def get_compression_step(curr_quality, downside=False):
+    # JPEG size changes slowly at low quality and steeply above ~70.
+    # Upsize steps stay small up high. Downsize steps are larger.
+    q = int(curr_quality)
+    if downside:
+        if q >= 80:
+            return 2
+        if q >= 60:
+            return 4
+        return 6
+    if q >= 75:
+        return 1
+    if q >= 55:
+        return 2
+    if q >= 35:
+        return 3
+    return 4
+
+def set_default_config():
+    """Apply unit or CC compression defaults once, and again only when the role changes."""
     global HIGH_COMP_QUALITY, MIN_COMP_QUALITY, HIGH_TARGET_SIZE, LOW_TARGET_SIZE, global_comp_quality
-    global compression_updated_for_cc
-    
-    if running_as_unit(): # Either device is unit or because unit after cc
-        if compression_updated_for_cc: # revert if cc losts internet
-            HIGH_TARGET_SIZE = 45 * 1024
-            LOW_TARGET_SIZE = 35 * 1024
-            HIGH_COMP_QUALITY = 80
-            MIN_COMP_QUALITY = 15
-            global_comp_quality = 20
-            compression_updated_for_cc = False
+    global curr_config_set
+
+    if running_as_unit():  # device is a unit, or fell back to unit after losing CC
+        if curr_config_set != "unit":
+            config = UNIT_START_CONFIG
+            HIGH_TARGET_SIZE = config["HIGH_TARGET_SIZE"]
+            LOW_TARGET_SIZE = config["LOW_TARGET_SIZE"]
+            HIGH_COMP_QUALITY = config["HIGH_COMP_QUALITY"]
+            MIN_COMP_QUALITY = config["MIN_COMP_QUALITY"]
+            global_comp_quality = config["global_comp_quality"]
+            curr_config_set = "unit"
         return
 
-    if compression_updated_for_cc: # need to update at just once
-        return
-    else:
-        HIGH_TARGET_SIZE = 99 * 1024 # max 99KB
-        LOW_TARGET_SIZE = 70 * 1024 # settle at min 70KB
-        
-        HIGH_COMP_QUALITY = 100
-        MIN_COMP_QUALITY = 35
-        
-        global_comp_quality = 35
-
-    compression_updated_for_cc = True
+    if curr_config_set != "cc":
+        config = CC_START_CONFIG
+        HIGH_TARGET_SIZE = config["HIGH_TARGET_SIZE"]
+        LOW_TARGET_SIZE = config["LOW_TARGET_SIZE"]
+        HIGH_COMP_QUALITY = config["HIGH_COMP_QUALITY"]
+        MIN_COMP_QUALITY = config["MIN_COMP_QUALITY"]
+        global_comp_quality = config["global_comp_quality"]
+        curr_config_set = "cc"
 
 def capture_image(compress_quality=None):  # MEMORY_HEAVY
     """Capture one image, store raw copy, compress, and auto-adjust global quality."""
     global img_capture_count, img_file_counter, global_comp_quality
     global db_store
+    global UNIT_START_CONFIG, CC_START_CONFIG
     global HIGH_COMP_QUALITY, MIN_COMP_QUALITY, HIGH_TARGET_SIZE, LOW_TARGET_SIZE
 
     # Burst path wakes once before the loop; this is a no-op if already awake.
@@ -1826,17 +1847,18 @@ def capture_image(compress_quality=None):  # MEMORY_HEAVY
         if not init_camera_sensor():
             logger.error("[PIR] Failed to initialize camera/sensor, will be retrying later...")
             return None, None, None
+        
+        img_capture_count += 1
+        img_file_counter += 1
+        event_epoch_ms = get_epoch_ms() + img_file_counter
+        
         img_snapshot = sensor.snapshot()
         turn_OFF_IR_emitter()
         if img_snapshot is None:
             raise Exception("snapshot returned None (camera not ready)")
         sensor.flush()
 
-        img_capture_count += 1
-        img_file_counter += 1
-        event_epoch_ms = get_epoch_ms() + img_file_counter
-
-        check_compression_for_cc()
+        set_default_config()
         if compress_quality:
             jpeg_bytearray = bytes(img_snapshot.compress(quality=compress_quality))  # MEMORY_HEAVY
             size = len(jpeg_bytearray)
@@ -1851,12 +1873,21 @@ def capture_image(compress_quality=None):  # MEMORY_HEAVY
             )  # TODO, move it debug later
 
             if size > HIGH_TARGET_SIZE:
-                global_comp_quality = max(MIN_COMP_QUALITY, global_comp_quality - 2)
+                global_comp_quality = max(MIN_COMP_QUALITY, global_comp_quality - get_compression_step(global_comp_quality, downside=True))
+                if curr_config_set == "unit":
+                    UNIT_START_CONFIG["HIGH_COMP_QUALITY"] = global_comp_quality
+                else:
+                    CC_START_CONFIG["HIGH_COMP_QUALITY"] = global_comp_quality
+                HIGH_COMP_QUALITY = global_comp_quality
+                logger.info(
+                    f"Image size {size} over target {HIGH_TARGET_SIZE}, max compress cap now {HIGH_COMP_QUALITY}"
+                )
             if size < LOW_TARGET_SIZE:
-                global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + 2)
+                global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + get_compression_step(global_comp_quality))
 
         return img_snapshot, jpeg_bytearray, event_epoch_ms
     except Exception as e:
+        db_store.update_img_dropped_count(1)
         logger.error(f"EXCP_ERR: [PIR] Failed to capture image: {e}\n{logger.exc_str(e)}")
         return None, None, None
     finally:
@@ -1897,7 +1928,7 @@ async def person_detection_loop():  # MEMORY_HEAVY
             await pir_trigger_event.wait()
             pir_trigger_event.clear()
         pir_burst_in_progress = True
-        logger.info(f"[IMG] ●●●●●●●●●●❯❯ Motion detected - capturing {BURST_SIZE} image... ❮❮●●●●●●●●●●")
+        logger.info(f"[IMG] ༄༄༄༄༄❯❯ ....Motion detected - capturing {BURST_SIZE} image.... ❮❮༄༄༄༄༄")
 
         try:
             power_mgmt.camera_wake()  # wake + skip_frames once for whole burst
@@ -1909,8 +1940,7 @@ async def person_detection_loop():  # MEMORY_HEAVY
                     logger.info(f"[PIR] 🅾🅾🅾🅾🅾🅾❯❯ Capturing {i+1}/{BURST_SIZE} image... ❮❮🅾🅾🅾🅾🅾🅾")
                     img_snapshot, imgbytes, event_epoch_ms = capture_image()
                     if img_snapshot is None or imgbytes is None or event_epoch_ms is None:
-                        logger.error(f"[PIR] Failed to capture image: ")
-                        img_capture_count -= 1
+                        logger.error(f"[PIR] Error in capturing image")
                         led.off()
                         continue
 
@@ -1939,7 +1969,6 @@ async def person_detection_loop():  # MEMORY_HEAVY
                         ) + imgbytes  # MEMORY_HEAVY
                     except Exception as e:
                         logger.error(f"EXCP_ERR: [PIR] Failed to pack image meta header: {e}\n{logger.exc_str(e)}")
-                        img_capture_count -= 1
                         led.off()
                         continue
 
@@ -1951,15 +1980,15 @@ async def person_detection_loop():  # MEMORY_HEAVY
                             logger.error(f"EXCP_ERR: [PIR] Error deleting imgbytes: {e}\n{logger.exc_str(e)}")
                         if enc_msgbytes is None:
                             logger.error("[PIR] encrypt_if_needed returned enc_msgbytes=None")
-                            img_capture_count -= 1
                             led.off()
                             continue
                         next_dst = next_device_in_spath() if running_as_unit() else None
-                        asyncio.create_task(_send_file_and_account(event_epoch_ms, enc_msgbytes, next_dst))
+                        asyncio.create_task(send_file_main_or_enqueue(
+                            "F", my_addr, enc_msgbytes, event_epoch_ms, None, ENCRYPTION_ENABLED, next_dst
+                        ))
 
                     except Exception as e:
                         logger.error(f"EXCP_ERR: [PIR] Failed to save encrypted file: {event_epoch_ms}, error: {e}\n{logger.exc_str(e)}")
-                        img_capture_count -= 1
                         continue
 
                     led.off()
@@ -2037,36 +2066,26 @@ async def image_sending_loop():
                 # Read encrypted bytes directly from file
                 logger.debug(f"[IMG] Reading encrypted image of creator: {creator}, file: {creator}_{epoch_ms}.enc")
 
-                transmission_start = get_ms_diff()
-                sent_succ = await send_file_main(
-                    "F", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst
+                sent_or_queued = await send_file_main_or_enqueue(
+                    "F", creator, enc_msgbytes, epoch_ms, md5, ENCRYPTION_ENABLED, next_dst, retry
                 )
-                if not sent_succ:
-                    store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
-                    if not store_succ:
-                        logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after send failure, error={err}")
-                    else:
-                        logger.warning(f"[IMG] upload_payload to server failed, image of creator={creator}, re-queued: {creator}_{epoch_ms}.enc")
+                if not sent_or_queued:
                     await asyncio.sleep(IMAGE_SENDING_LITE_DELAY)
                     continue
-
-                transmission_end = get_ms_diff()
-                transmission_time = transmission_end - transmission_start
-                db_store.update_img_sent_count(1)
-                logger.info(f"[IMG] ✔✔✔ Image transmission completed in {transmission_time} ms ({transmission_time/1000:.4f} seconds), file: {creator}_{epoch_ms} to {next_dst}")
 
                 if db_store.get_img_queued_count() > 0:
                     await asyncio.sleep(IMAGE_SENDING_NEXT_INTERVAL)
 
             except Exception as e:
-                logger.error(f"EXCP_ERR: [IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued\n{logger.exc_str(e)}")
-                store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
-                if not store_succ:
-                    logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after exception, error={err}")
-                else:
-                    logger.warning(f"[IMG] upload_payload to server failed, image of creator={creator}, re-queued: {creator}_{epoch_ms}.enc")
-                await asyncio.sleep(IMAGE_SENDING_LITE_DELAY)
-                continue
+                logger.fatal(f"EXCP_ERR: [IMG] unexpected error processing image event {creator}_{epoch_ms}.enc: {e}, re-queued\n{logger.exc_str(e)}")
+                if enc_msgbytes:
+                    store_succ, err = db_store.store_image(epoch_ms, creator, retry + 1, enc_msgbytes, False)
+                    if not store_succ:
+                        logger.error(f"[IMG] Failed to re-queue image {creator}_{epoch_ms}.enc after exception, error={err}")
+                    else:
+                        logger.warning(f"[IMG] upload_payload to server failed, image of creator={creator}, re-queued: {creator}_{epoch_ms}.enc")
+                    await asyncio.sleep(IMAGE_SENDING_LITE_DELAY)
+                    continue
             finally:
                 try:
                     if enc_msgbytes is not None:

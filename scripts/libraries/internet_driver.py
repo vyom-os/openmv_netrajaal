@@ -14,6 +14,7 @@ import ubinascii
 import enc
 import uasyncio as asyncio
 from message_codec import build_heartbeat_payload
+from utils import pack_image_meta_header, get_rand
 from detect import turn_ON_IR_emitter, turn_OFF_IR_emitter
 import power_mgmt
 import json
@@ -462,7 +463,7 @@ class InternetDriver(InternetUtils):
             _, err_resp = await self._send_command("AT+QIGETERROR", timeout=5)
             logger.error(f"[CELL] ✘✘✘ QIGETERROR after QICSGP: {err_resp}")
             return False
-        logger.info(f"[CELL] APN set successfully to {SIM_APN}")
+        logger.info(f"[CELL] APN set successfully to ....❯❯❯❯ {SIM_APN}")
 
         # PDP context set: 
         success, resp = await self._send_command(f"AT+QIACT={context_id}", timeout=30)
@@ -1122,19 +1123,28 @@ class InternetDriver(InternetUtils):
     def get_last_fail_count(self):
         return self._last_fail_count
         
-    def get_image_payload(self):  # MEMORY_HEAVY
+    def get_image_payload(self):
         """Capture a JPEG from the camera, hybrid-encrypt, return API payload dict."""
         was_asleep = power_mgmt.is_asleep()
         power_mgmt.camera_wake()
         try:
             turn_ON_IR_emitter()
-            img = sensor.snapshot()
+            img_snapshot = sensor.snapshot()
             turn_OFF_IR_emitter()
-            if img is None:
+            if img_snapshot is None:
                 logger.error("[CELL] snapshot returned None (camera not ready)")
                 return None
-            jpeg_bytearray = img.compress(quality=25)
-            imgbytes = bytes(jpeg_bytearray)
+            imgbytes = bytes(img_snapshot.compress(quality=25))
+            # cleanup
+            del img_snapshot
+            img_snapshot = None
+
+            logger.info(f"⛃⛃⛃⛁⛁⛁❯❯ Captured image of size: {len(imgbytes)}... ❮❮⛃⛃⛃⛁⛁⛁")
+            event_epoch_ms = utime.time_ns() // 1_000_000
+            image_id = get_rand(3)
+            imgbytes = pack_image_meta_header(
+                0, 0, event_epoch_ms, image_id, "F"
+            ) + imgbytes  # MEMORY_HEAVY
             if uses_hybrid_encryption("F"):
                 encnode = enc.EncNode(self.machine_id)
                 enc_msgbytes = enc.encrypt_hybrid(imgbytes, encnode.get_pub_key())  # MEMORY_HEAVY
@@ -1143,9 +1153,9 @@ class InternetDriver(InternetUtils):
                 img_b64_str = ubinascii.b2a_base64(imgbytes).rstrip().decode()  # MEMORY_HEAVY
             return {
                 "machine_id": self.machine_id,
-                "msg_typ": "event",
+                "msg_typ": "F",
                 "data": img_b64_str,
-                "epoch_ms": utime.time_ns() // 1_000_000,
+                "epoch_ms": event_epoch_ms,
                 "enc": ENCRYPTION_ENABLED,
             }
         except Exception as e:
