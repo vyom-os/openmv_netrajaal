@@ -10,6 +10,7 @@
 # Cscope files #
 ############
 cscope.*
+*extra*
 
 # Logs and databases #
 ######################
