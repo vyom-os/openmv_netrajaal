@@ -553,8 +553,7 @@ class InternetDriver(InternetUtils):
         # Let module settle (e.g. after GPS/cellular handover, pending output)
         await asyncio.sleep(0.5)
 
-        # Undo AT+QSCLK=1 from a prior failed init / idle — do this on every
-        # internet retry, not only after a board restart.
+        # Unit may have set CFUN=4; turn cellular RF back on before configuration.
         await self._exit_sleep()
         
         logger.info("[CELL] Draining past UART input...")
@@ -613,9 +612,9 @@ class InternetDriver(InternetUtils):
             return True
     
     async def establish_internet(self, retry_count=3):
-        init_sleep = 15
+        init_sleep = 60
         logger.info(f"[CELL] Establishing internet connection... with sleep for {init_sleep} seconds")
-        await asyncio.sleep(init_sleep) # sleep for 10 seconds to let module settle
+        await asyncio.sleep(init_sleep) # sleep for 60 seconds to let module settle
         
         init_ok = False
         init_error = None
@@ -646,36 +645,26 @@ class InternetDriver(InternetUtils):
     # ------------------------------------------------------------------
 
     async def _enter_sleep(self):
-        """Stop cellular RF, then allow EC200 UART sleep. GNSS (AT+QGPS) still works in CFUN=4."""
+        """Stop cellular RF. GNSS (AT+QGPS) still works in CFUN=4."""
         try:
             await self._send_command("AT+CFUN=4", timeout=15)
             logger.info("[CELL] Cellular antenna off (CFUN=4)")
-            await self._send_command("AT+QSCLK=1", timeout=2)
-            logger.info("[CELL] EC200 sleep enabled")
         except Exception:
             pass
 
     async def _exit_sleep(self):
-        """Wake UART, then turn cellular RF back on.
+        """Turn cellular RF back on.
 
         Call this at the start of every `_configure_module` (init and each retry).
         """
         try:
-            # Dummy AT: while asleep the first command is often lost; that is OK.
-            await self._send_command("AT", timeout=1)
-            await asyncio.sleep(0.2)
-            success, resp = await self._send_command("AT+QSCLK=0", timeout=2)
-            if success:
-                logger.info("[CELL] EC200 sleep disabled (QSCLK=0)")
-            else:
-                logger.warning(f"[CELL] QSCLK=0 not confirmed (module may still be waking): {resp}")
             success, resp = await self._send_command("AT+CFUN=1", timeout=15)
             if success:
                 logger.info("[CELL] Cellular antenna on (CFUN=1)")
             else:
                 logger.warning(f"[CELL] CFUN=1 not confirmed: {resp}")
         except Exception as e:
-            logger.error(f"[CELL] error waking from sleep: {e}")
+            logger.error(f"[CELL] error enabling cellular RF: {e}")
         
     async def _check_network_healthy(self):
         """

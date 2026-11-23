@@ -1882,6 +1882,18 @@ def capture_image(compress_quality=None):  # MEMORY_HEAVY
                 logger.info(
                     f"Image size {size} over target {HIGH_TARGET_SIZE}, max compress cap now {HIGH_COMP_QUALITY}"
                 )
+                
+                # if this is unit already, we will dropping it
+                if running_as_unit():
+                    del img_snapshot
+                    img_snapshot = None
+            
+                    del jpeg_bytearray
+                    jpeg_bytearray = None
+                    
+                    db_store.update_img_dropped_count(1)
+                    logger.warning(f"[PIR] Image dropped because image of size {size} over target {HIGH_TARGET_SIZE} and running as unit")
+                    return None, None, None
             if size < LOW_TARGET_SIZE:
                 global_comp_quality = min(HIGH_COMP_QUALITY, global_comp_quality + get_compression_step(global_comp_quality))
 
@@ -2726,15 +2738,12 @@ async def keep_updating_gps():
         while trans_in_progress:
             await asyncio.sleep(GPS_WAIT_SEC)
 
-        # CC needs modem awake for cellular; unit node can QSCLK sleep the whole EC200
-        sleep_module = running_as_unit()
-
         async with tracx_uart_lock:
             init_ok = gps_module.initialize_gps()
         if not init_ok:
             logger.warning("[GPS] Init failed; putting module to sleep")
             async with tracx_uart_lock:
-                gps_module.enter_gps_sleep(sleep_module=sleep_module)
+                gps_module.enter_gps_sleep()
             return
 
         logger.info(f"[GPS] Acquiring fix (up to {GPS_ACQUIRE_TIMEOUT_SEC}s)...")
@@ -2773,7 +2782,7 @@ async def keep_updating_gps():
             logger.info("[GPS] No fix within acquire window")
 
         async with tracx_uart_lock:
-            gps_module.enter_gps_sleep(sleep_module=sleep_module)
+            gps_module.enter_gps_sleep()
         logger.info("[GPS] One-shot update done; GNSS asleep until next boot")
 
     except Exception as e:
@@ -2781,7 +2790,7 @@ async def keep_updating_gps():
         try:
             if gps_module is not None:
                 async with tracx_uart_lock:
-                    gps_module.enter_gps_sleep(sleep_module=running_as_unit())
+                    gps_module.enter_gps_sleep()
         except Exception as e:
             logger.error(f"EXCP_ERR: [GPS] Failed to enter sleep after error: {e}\n{logger.exc_str(e)}")
 
